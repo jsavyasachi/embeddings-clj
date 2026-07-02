@@ -13,12 +13,6 @@ exports on the JVM via ONNX Runtime.
 <a href="https://onnxruntime.ai"><img src="https://img.shields.io/badge/ONNX%20Runtime-5A5AB5?style=flat&logo=onnx&logoColor=fff" alt="ONNX Runtime" /></a>
 <a href="https://github.com/jsavyasachi/tokenizers-clj"><img src="https://img.shields.io/badge/tokenizers--clj-5881D8?style=flat&logo=clojure&logoColor=fff" alt="tokenizers-clj" /></a>
 
-Part of a local RAG substrate stack:
-[pdfplumber-clj](https://github.com/jsavyasachi/pdfplumber-clj) (extract) →
-[chunk-clj](https://github.com/jsavyasachi/chunk-clj) (split) →
-[tokenizers-clj](https://github.com/jsavyasachi/tokenizers-clj) (tokenize) →
-**embeddings-clj** (embed).
-
 ## Installation
 
 deps.edn:
