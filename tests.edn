@@ -1,4 +1,12 @@
 #kaocha/v1
-{:tests [{:id :unit
-          :test-paths ["test"]}]
- :plugins [:kaocha.plugin/randomize]}
+#profile
+{:default
+ {:tests [{:id :unit
+           :test-paths ["test"]
+           :kaocha.filter/skip-meta [:integration]}]
+  :plugins [:kaocha.plugin/randomize]}
+
+ :integration
+ {:tests [{:id :unit
+           :test-paths ["test"]}]
+  :plugins [:kaocha.plugin/randomize]}}
