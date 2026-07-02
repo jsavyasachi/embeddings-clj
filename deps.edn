@@ -1,15 +1,15 @@
 {:paths ["src" "resources"]
 
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
-        com.microsoft.onnxruntime/onnxruntime {:mvn/version "1.22.0"}
+        com.microsoft.onnxruntime/onnxruntime {:mvn/version "1.27.0"}
         net.clojars.savya/tokenizers-clj {:mvn/version "0.1.2"}}
 
  :aliases
  {:test
   {:extra-paths ["test" "dev" "test/resources"]
    :extra-deps {lambdaisland/kaocha {:mvn/version "1.91.1392"}
-                org.slf4j/slf4j-nop {:mvn/version "2.0.16"}
-                org.clojure/data.json {:mvn/version "2.5.1"}}
+                org.slf4j/slf4j-nop {:mvn/version "2.0.18"}
+                org.clojure/data.json {:mvn/version "2.5.2"}}
    :main-opts ["-m" "kaocha.runner"]}
 
   ;; Clojure version overrides for the CI matrix:
@@ -18,6 +18,6 @@
   :1.12 {:override-deps {org.clojure/clojure {:mvn/version "1.12.0"}}}
 
   :build
-  {:deps {io.github.clojure/tools.build {:mvn/version "0.10.6"}
-          slipset/deps-deploy {:mvn/version "0.2.2"}}
+  {:deps {io.github.clojure/tools.build {:mvn/version "0.10.14"}
+          slipset/deps-deploy {:mvn/version "0.2.5"}}
    :ns-default build}}}
