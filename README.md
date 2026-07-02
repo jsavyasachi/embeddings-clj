@@ -5,7 +5,7 @@
 [![test](https://github.com/jsavyasachi/embeddings-clj/actions/workflows/test.yml/badge.svg)](https://github.com/jsavyasachi/embeddings-clj/actions/workflows/test.yml)
 
 Local text-embedding inference for Clojure. Runs sentence-transformers ONNX
-exports on the JVM via ONNX Runtime - no Python, no server, no API key.
+exports on the JVM via ONNX Runtime.
 
 ## Stack
 
