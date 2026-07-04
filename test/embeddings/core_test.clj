@@ -96,3 +96,17 @@
   (when-fixtures
     (embeddings/with-model [model "fixtures/token-model" {:normalize? false}]
       (is (= 4 (alength ^floats (embeddings/embed model "hello qqq")))))))
+
+(deftest prefix-option
+  (when-fixtures
+    (embeddings/with-model [model "fixtures/token-model" {:normalize? false}]
+      (testing ":prefix prepends to every input, matching manual prepending"
+        (let [manual (embeddings/embed model "query: hello")
+              via-opt (embeddings/embed model "hello" {:prefix "query: "})]
+          (is (= (vec manual) (vec via-opt))))
+        (let [manual (embeddings/embed-batch model ["query: a" "query: b"])
+              via-opt (embeddings/embed-batch model ["a" "b"] {:prefix "query: "})]
+          (is (= (mapv vec manual) (mapv vec via-opt)))))
+      (testing "nil/absent opts unchanged"
+        (is (= (vec (embeddings/embed model "x"))
+               (vec (embeddings/embed model "x" nil))))))))

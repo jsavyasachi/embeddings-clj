@@ -202,7 +202,7 @@
                         {:embeddings/error :unsupported-output
                          :class (class value)}))))
 
-(defn embed-batch
+(defn- embed-batch*
   [model texts]
   (ensure-open model)
   (if (empty? texts)
@@ -224,6 +224,11 @@
             (.close run-result))
           (close-all tensors))))))
 
+(defn embed-batch
+  ([model texts] (embed-batch model texts nil))
+  ([model texts {:keys [prefix]}]
+   (embed-batch* model (if prefix (mapv #(str prefix %) texts) texts))))
+
 (defn embed
-  [model text]
-  (first (embed-batch model [text])))
+  ([model text] (embed model text nil))
+  ([model text opts] (first (embed-batch model [text] opts))))

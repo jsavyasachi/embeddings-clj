@@ -18,19 +18,31 @@ exports on the JVM via ONNX Runtime.
 deps.edn:
 
 ```clojure
-net.clojars.savya/embeddings-clj {:mvn/version "0.1.0"}
+net.clojars.savya/embeddings-clj {:mvn/version "0.2.0"}
 ```
 
 Leiningen:
 
 ```clojure
-[net.clojars.savya/embeddings-clj "0.1.0"]
+[net.clojars.savya/embeddings-clj "0.2.0"]
 ```
 
 ## Getting a model
 
 Any sentence-transformers-style ONNX export works: a directory containing
-`model.onnx` and `tokenizer.json`. For example, all-MiniLM-L6-v2:
+`model.onnx` and `tokenizer.json`. `embeddings.hub/fetch-model` downloads one
+from the Hugging Face Hub into `~/.cache/embeddings-clj` (tries
+`onnx/model.onnx`, falls back to `model.onnx`; already-cached files are not
+re-downloaded):
+
+```clojure
+(require '[embeddings.hub :as hub])
+
+(def model-dir (hub/fetch-model "sentence-transformers/all-MiniLM-L6-v2"))
+;; opts: {:cache-dir "..." :revision "main"}
+```
+
+Or fetch manually:
 
 ```bash
 mkdir -p models/all-MiniLM-L6-v2
@@ -43,6 +55,13 @@ curl -fL -o models/all-MiniLM-L6-v2/tokenizer.json \
 Compatible model families include all-MiniLM, all-mpnet, BGE, GTE, and E5
 (anything whose ONNX graph takes `input_ids`/`attention_mask`/`token_type_ids`
 and outputs token embeddings or a pre-pooled sentence embedding).
+
+E5-style models expect instruction prefixes; pass `:prefix` per call:
+
+```clojure
+(emb/embed model "how do I bake bread" {:prefix "query: "})
+(emb/embed-batch model documents {:prefix "passage: "})
+```
 
 ## Usage
 
