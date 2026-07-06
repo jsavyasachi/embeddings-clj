@@ -36,6 +36,28 @@
       (is (contains? (:input-names model) "input_ids"))
       (is (contains? (:input-names model) "attention_mask")))))
 
+(deftest load-model-execution-provider-test
+  (when-fixtures
+    (testing "unknown provider"
+      (try
+        (embeddings/load-model "fixtures/token-model" {:execution-providers [:bogus]})
+        (is false "expected exception")
+        (catch clojure.lang.ExceptionInfo ex
+          (is (= {:embeddings/error :unknown-execution-provider
+                  :provider :bogus}
+                 (ex-data ex))))))
+    (testing "provider unavailable shape"
+      (try
+        (let [model (embeddings/load-model "fixtures/token-model"
+                                           {:execution-providers [:cuda]})]
+          (embeddings/close model)
+          (is true "cuda provider loaded"))
+        (catch clojure.lang.ExceptionInfo ex
+          (is (= :execution-provider-unavailable
+                 (:embeddings/error (ex-data ex))))
+          (is (= :cuda (:provider (ex-data ex))))
+          (is (some? (ex-cause ex))))))))
+
 (deftest token-model-mean-pooling-test
   (when-fixtures
     (embeddings/with-model [model "fixtures/token-model" {:normalize? false

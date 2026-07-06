@@ -3,10 +3,11 @@
             [embeddings.pooling :as pooling]
             [tokenizers.core :as tokenizers])
   (:import (ai.onnxruntime NodeInfo OnnxTensor OnnxValue OrtEnvironment OrtSession
-                           TensorInfo)
+                           OrtException TensorInfo)
            (ai.onnxruntime OrtSession$Result)
+           (ai.onnxruntime OrtSession$SessionOptions)
            (java.io File)
-           (java.util HashMap Map)))
+           (java.util Collections HashMap Map)))
 
 (set! *warn-on-reflection* true)
 
@@ -42,7 +43,61 @@
       (throw (model-error "model output is not a tensor"
                           {:embeddings/error :unsupported-output})))))
 
+(defn- provider-name [provider]
+  (if (map? provider) (:provider provider) provider))
+
+(defn- provider-device-id ^long [provider]
+  (long (or (when (map? provider) (:device-id provider)) 0)))
+
+(defn- provider-unavailable [provider cause]
+  (throw (ex-info "execution provider unavailable"
+                  {:embeddings/error :execution-provider-unavailable
+                   :provider provider}
+                  cause)))
+
+(defn- add-execution-provider!
+  [^OrtSession$SessionOptions session-options entry]
+  (let [provider (provider-name entry)]
+    (try
+      (case provider
+        :cuda (.addCUDA session-options (int (provider-device-id entry)))
+        :coreml (.addCoreML session-options)
+        :rocm (.addROCM session-options (int (provider-device-id entry)))
+        :tensorrt (.addTensorrt session-options (int (provider-device-id entry)))
+        :directml (.addDirectML session-options (int (provider-device-id entry)))
+        :xnnpack (.addXnnpack session-options (Collections/emptyMap))
+        (throw (ex-info "unknown execution provider"
+                        {:embeddings/error :unknown-execution-provider
+                         :provider provider})))
+      (catch OrtException ex
+        (provider-unavailable provider ex))
+      (catch UnsatisfiedLinkError ex
+        (provider-unavailable provider ex)))))
+
+(defn- ->session-options
+  ^OrtSession$SessionOptions
+  [execution-providers]
+  (when (seq execution-providers)
+    (let [session-options (OrtSession$SessionOptions.)]
+      (try
+        (doseq [entry execution-providers]
+          (add-execution-provider! session-options entry))
+        session-options
+        (catch Throwable ex
+          (.close session-options)
+          (throw ex))))))
+
+(defn- first-provider [execution-providers]
+  (provider-name (first execution-providers)))
+
 (defn load-model
+  "Load a local model directory containing `model.onnx` and `tokenizer.json`.
+
+  Options include `:pooling` (`:mean`, `:mean-sqrt-len`, `:cls`, `:max`),
+  `:normalize?`, `:max-length`, and `:execution-providers`, a vector of
+  provider keywords or maps such as `[:coreml]`, `[:cuda]`, or
+  `[{:provider :cuda :device-id 0}]`. CPU remains the implicit fallback when
+  execution providers are absent or empty."
   ([model-dir]
    (load-model model-dir nil))
   ([model-dir opts]
@@ -57,7 +112,17 @@
                            {:embeddings/error :tokenizer-not-found
                             :path (.getPath tokenizer-file)})))
      (let [env (OrtEnvironment/getEnvironment)
-           session (.createSession ^OrtEnvironment env (.getPath model-file))]
+           session-options (->session-options (:execution-providers opts))
+           session (if session-options
+                     (try
+                       (.createSession ^OrtEnvironment env (.getPath model-file) session-options)
+                       (catch OrtException ex
+                         (provider-unavailable (first-provider (:execution-providers opts)) ex))
+                       (catch UnsatisfiedLinkError ex
+                         (provider-unavailable (first-provider (:execution-providers opts)) ex))
+                       (finally
+                         (.close ^OrtSession$SessionOptions session-options)))
+                     (.createSession ^OrtEnvironment env (.getPath model-file)))]
        {:session session
         :tokenizer (tokenizers/from-file (.getPath tokenizer-file))
         :opts (merge default-opts opts)

@@ -1,7 +1,8 @@
 (ns embeddings.hub
   "Download sentence-transformers ONNX exports from the Hugging Face Hub into
   a local cache, for use with `embeddings.core/load-model`."
-  (:require [clojure.java.io :as io])
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str])
   (:import (java.net URI)
            (java.net.http HttpClient HttpClient$Redirect HttpRequest
                           HttpResponse$BodyHandlers)
@@ -23,6 +24,42 @@
 
 (defn- default-cache-dir []
   (io/file (System/getProperty "user.home") ".cache" "embeddings-clj"))
+
+(def ^:private quantized-model-paths
+  ["onnx/model_quantized.onnx"
+   "onnx/model_qint8_avx512_vnni.onnx"
+   "onnx/model_int8.onnx"
+   "model_quantized.onnx"])
+
+(defn- validate-variant! [variant]
+  (when (and (string? variant)
+             (or (not (str/ends-with? variant ".onnx"))
+                 (str/includes? variant "..")
+                 (str/starts-with? variant "/")))
+    (throw (ex-info (str "Invalid model variant: " (pr-str variant))
+                    {:embeddings/error :invalid-variant :variant variant}))))
+
+(defn- variant-slug ^String [^String path]
+  (let [filename (.getName (io/file path))
+        basename (subs filename 0 (- (count filename) (count ".onnx")))]
+    (str/replace basename #"[^A-Za-z0-9._-]" "")))
+
+(defn- model-paths [variant]
+  (validate-variant! variant)
+  (cond
+    (nil? variant) ["onnx/model.onnx" "model.onnx"]
+    (= :quantized variant) quantized-model-paths
+    (string? variant) [variant]
+    :else (throw (ex-info (str "Invalid model variant: " (pr-str variant))
+                          {:embeddings/error :invalid-variant :variant variant}))))
+
+(defn- model-root [cache-dir model-id variant]
+  (let [root (io/file (or cache-dir (default-cache-dir)) model-id)]
+    (cond
+      (nil? variant) root
+      (= :quantized variant) (io/file root "quantized")
+      (string? variant) (io/file root (variant-slug variant))
+      :else root)))
 
 (defn- http-download!
   "Download url to dest via a temp file. Returns true on HTTP 200, false on
@@ -57,15 +94,15 @@
                        :urls (vec urls)}))))
 
 (defn- fetch-model*
-  [model-id {:keys [cache-dir revision]} download!]
+  [model-id {:keys [cache-dir revision variant]} download!]
   (validate-model-id! model-id)
   (let [revision (or revision "main")
-        root (io/file (or cache-dir (default-cache-dir)) model-id)
+        paths (model-paths variant)
+        ^java.io.File root (model-root cache-dir model-id variant)
         model-file (io/file root "model.onnx")
         tokenizer-file (io/file root "tokenizer.json")]
     (when-not (and (.exists model-file) (pos? (.length model-file)))
-      (fetch-file! [(resolve-url model-id revision "onnx/model.onnx")
-                    (resolve-url model-id revision "model.onnx")]
+      (fetch-file! (mapv #(resolve-url model-id revision %) paths)
                    model-file download!))
     (when-not (and (.exists tokenizer-file) (pos? (.length tokenizer-file)))
       (fetch-file! [(resolve-url model-id revision "tokenizer.json")]
@@ -79,10 +116,13 @@
   `embeddings.core/load-model`. Files already in the cache are not
   re-downloaded.
 
-  Options: `:cache-dir` (default `~/.cache/embeddings-clj`) and `:revision`
-  (default \"main\").
+  Options: `:cache-dir` (default `~/.cache/embeddings-clj`), `:revision`
+  (default \"main\"), and `:variant`. `:variant :quantized` tries common
+  quantized ONNX paths and stores them under a `quantized` cache subdir. A
+  string `:variant` is an explicit repo-relative `.onnx` path and is cached in
+  a path-derived subdir.
 
   Errors are `ex-info` keyed `:embeddings/error`
-  (`:invalid-model-id`, `:download-failed`)."
+  (`:invalid-model-id`, `:invalid-variant`, `:download-failed`)."
   ([model-id] (fetch-model model-id nil))
   ([model-id opts] (fetch-model* model-id opts http-download!)))

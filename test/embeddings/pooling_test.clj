@@ -30,6 +30,15 @@
     (is (approx= (row 2.0 4.0) pooled))
     (is (not-any? #(identical? pooled %) token-vecs))))
 
+(deftest mean-sqrt-len-test
+  (let [token-vecs (tokens (row 1.0 2.0)
+                           (row 3.0 6.0)
+                           (row 100.0 200.0))
+        pooled (pooling/mean-sqrt-len token-vecs (long-array [1 1 0]))
+        denom (Math/sqrt 2.0)]
+    (is (approx= (row (/ 4.0 denom) (/ 8.0 denom)) pooled))
+    (is (not-any? #(identical? pooled %) token-vecs))))
+
 (deftest cls-test
   (let [first-row (row 1.0 2.0)
         token-vecs (tokens first-row
@@ -53,6 +62,8 @@
     (is (approx= (row 0.0 0.0)
                  (pooling/mean token-vecs (long-array [0 0]))))
     (is (approx= (row 0.0 0.0)
+                 (pooling/mean-sqrt-len token-vecs (long-array [0 0]))))
+    (is (approx= (row 0.0 0.0)
                  (pooling/max-pool token-vecs (long-array [0 0]))))))
 
 (deftest pool-dispatch-test
@@ -61,6 +72,8 @@
         mask (long-array [1 1])]
     (is (approx= (pooling/mean token-vecs mask)
                  (pooling/pool :mean token-vecs mask)))
+    (is (approx= (pooling/mean-sqrt-len token-vecs mask)
+                 (pooling/pool :mean-sqrt-len token-vecs mask)))
     (is (approx= (pooling/cls token-vecs mask)
                  (pooling/pool :cls token-vecs mask)))
     (is (approx= (pooling/max-pool token-vecs mask)

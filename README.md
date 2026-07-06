@@ -18,13 +18,13 @@ exports on the JVM via ONNX Runtime.
 deps.edn:
 
 ```clojure
-net.clojars.savya/embeddings-clj {:mvn/version "0.2.0"}
+net.clojars.savya/embeddings-clj {:mvn/version "0.3.0"}
 ```
 
 Leiningen:
 
 ```clojure
-[net.clojars.savya/embeddings-clj "0.2.0"]
+[net.clojars.savya/embeddings-clj "0.3.0"]
 ```
 
 ## Getting a model
@@ -39,7 +39,18 @@ re-downloaded):
 (require '[embeddings.hub :as hub])
 
 (def model-dir (hub/fetch-model "sentence-transformers/all-MiniLM-L6-v2"))
-;; opts: {:cache-dir "..." :revision "main"}
+;; opts: {:cache-dir "..." :revision "main" :variant ...}
+```
+
+Quantized exports: `:variant :quantized` tries the common quantized paths
+(`onnx/model_quantized.onnx`, `onnx/model_qint8_avx512_vnni.onnx`,
+`onnx/model_int8.onnx`, `model_quantized.onnx`) in order; a string `:variant`
+names an explicit repo-relative `.onnx` path (e.g. `"onnx/model_q4.onnx"`).
+Variants are cached in their own subdirectory, so full-precision and quantized
+copies of the same model coexist:
+
+```clojure
+(hub/fetch-model "sentence-transformers/all-MiniLM-L6-v2" {:variant :quantized})
 ```
 
 Or fetch manually:
@@ -88,9 +99,15 @@ Options to `load-model` (defaults shown):
 
 | option | default | meaning |
 |---|---|---|
-| `:pooling` | `:mean` | `:mean` (mask-weighted), `:cls`, or `:max` over token embeddings |
+| `:pooling` | `:mean` | `:mean` (mask-weighted), `:mean-sqrt-len` (sum / sqrt of token count), `:cls`, or `:max` over token embeddings |
 | `:normalize?` | `true` | L2-normalize output vectors (unit length, ready for cosine) |
 | `:max-length` | `512` | truncate inputs to this many tokens |
+| `:execution-providers` | none (CPU) | ONNX Runtime execution providers to try, e.g. `[:coreml]` or `[{:provider :cuda :device-id 0}]`; also `:rocm`, `:tensorrt`, `:directml`, `:xnnpack` |
+
+Execution providers require an onnxruntime build that bundles them (the
+default `com.microsoft.onnxruntime/onnxruntime` artifact is CPU-only; CUDA
+needs `onnxruntime_gpu`). Requesting a provider the runtime lacks throws
+`ex-info` with `{:embeddings/error :execution-provider-unavailable}`.
 
 Models whose ONNX graph already outputs a pooled `[batch, hidden]` sentence
 embedding are detected automatically and used as-is (`:pooling` is ignored).
