@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.3.2] - 2026-07-09
+### Changed
+- Reorganized the README into a cljdoc article tree under `doc/` (Getting a model, Usage). Documentation content is unchanged; no API changes.
+
 All notable changes to this project are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [0.3.1] - 2026-07-09
