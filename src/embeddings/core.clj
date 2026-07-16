@@ -19,6 +19,27 @@
    :normalize? true
    :max-length 512})
 
+(defprotocol EmbeddingProvider
+  "A source of fixed-width text embeddings."
+  (embed [provider text] [provider text opts])
+  (embed-batch [provider texts] [provider texts opts])
+  (dimension [provider]))
+
+(declare embed-batch* model-dimension)
+
+(defrecord LocalModel [session tokenizer opts input-names closed?]
+  EmbeddingProvider
+  (embed [model text]
+    (embed model text nil))
+  (embed [model text opts]
+    (first (embed-batch model [text] opts)))
+  (embed-batch [model texts]
+    (embed-batch model texts nil))
+  (embed-batch [model texts {:keys [prefix]}]
+    (embed-batch* model (if prefix (mapv #(str prefix %) texts) texts)))
+  (dimension [model]
+    (model-dimension model)))
+
 (defn- model-error
   [message data]
   (ex-info message data))
@@ -214,11 +235,11 @@
                        (finally
                          (.close ^OrtSession$SessionOptions session-options)))
                      (.createSession ^OrtEnvironment env (.getPath model-file)))]
-       {:session session
-        :tokenizer (tokenizers/from-file (.getPath tokenizer-file))
-        :opts resolved-opts
-        :input-names (set (.getInputNames ^OrtSession session))
-        :closed? (atom false)}))))
+       (->LocalModel session
+                     (tokenizers/from-file (.getPath tokenizer-file))
+                     resolved-opts
+                     (set (.getInputNames ^OrtSession session))
+                     (atom false))))))
 
 (defn close
   [model]
@@ -234,7 +255,7 @@
        (finally
          (close ~sym)))))
 
-(defn dimension
+(defn- model-dimension
   ^long
   [model]
   (ensure-open model)
@@ -379,12 +400,3 @@
           (when-let [^OrtSession$Result run-result @result]
             (.close run-result))
           (close-all tensors))))))
-
-(defn embed-batch
-  ([model texts] (embed-batch model texts nil))
-  ([model texts {:keys [prefix]}]
-   (embed-batch* model (if prefix (mapv #(str prefix %) texts) texts))))
-
-(defn embed
-  ([model text] (embed model text nil))
-  ([model text opts] (first (embed-batch model [text] opts))))

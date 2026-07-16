@@ -177,3 +177,11 @@
       (testing "nil/absent opts unchanged"
         (is (= (vec (embeddings/embed model "x"))
                (vec (embeddings/embed model "x" nil))))))))
+
+(deftest embedding-provider-protocol-test
+  (is (some? (ns-resolve 'embeddings.core 'EmbeddingProvider)))
+  (is (try
+        (require 'embeddings.providers)
+        true
+        (catch java.io.FileNotFoundException _
+          false))))
