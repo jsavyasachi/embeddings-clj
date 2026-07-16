@@ -19,6 +19,27 @@
    :normalize? true
    :max-length 512})
 
+(defprotocol EmbeddingProvider
+  "A source of fixed-width text embeddings."
+  (embed [provider text] [provider text opts])
+  (embed-batch [provider texts] [provider texts opts])
+  (dimension [provider]))
+
+(declare embed-batch* model-dimension)
+
+(defrecord LocalModel [session tokenizer opts input-names output-name closed?]
+  EmbeddingProvider
+  (embed [model text]
+    (embed model text nil))
+  (embed [model text opts]
+    (first (embed-batch model [text] opts)))
+  (embed-batch [model texts]
+    (embed-batch model texts nil))
+  (embed-batch [model texts {:keys [prefix]}]
+    (embed-batch* model (if prefix (mapv #(str prefix %) texts) texts)))
+  (dimension [model]
+    (model-dimension model)))
+
 (defn- model-error
   [message data]
   (ex-info message data))
@@ -133,6 +154,16 @@
       (throw (model-error "model output is not a tensor"
                           {:embeddings/error :unsupported-output})))))
 
+(defn- selected-output-name
+  [output-names {:keys [output-name]}]
+  (if output-name
+    (if (contains? (set output-names) output-name)
+      output-name
+      (throw (model-error "model output not found"
+                          {:embeddings/error :output-not-found
+                           :output-name output-name})))
+    (first output-names)))
+
 (defn- provider-name [provider]
   (if (map? provider) (:provider provider) provider))
 
@@ -180,6 +211,32 @@
 (defn- first-provider [execution-providers]
   (provider-name (first execution-providers)))
 
+(defn- close-on-failure!
+  [cause resources]
+  (doseq [resource resources]
+    (when resource
+      (try
+        (.close ^java.lang.AutoCloseable resource)
+        (catch Throwable cleanup-error
+          (.addSuppressed ^Throwable cause cleanup-error)))))
+  (throw cause))
+
+(defn- construct-local-model
+  [session tokenizer-loader resolved-opts input-names output-names]
+  (let [tokenizer (atom nil)]
+    (try
+      (reset! tokenizer (tokenizer-loader))
+      (->LocalModel session
+                    @tokenizer
+                    resolved-opts
+                    (set (if (fn? input-names) (input-names) input-names))
+                    (selected-output-name
+                     (if (fn? output-names) (output-names) output-names)
+                     resolved-opts)
+                    (atom false))
+      (catch Throwable ex
+        (close-on-failure! ex [@tokenizer session])))))
+
 (defn load-model
   "Load a local model directory containing `model.onnx` and `tokenizer.json`.
 
@@ -214,16 +271,19 @@
                        (finally
                          (.close ^OrtSession$SessionOptions session-options)))
                      (.createSession ^OrtEnvironment env (.getPath model-file)))]
-       {:session session
-        :tokenizer (tokenizers/from-file (.getPath tokenizer-file))
-        :opts resolved-opts
-        :input-names (set (.getInputNames ^OrtSession session))
-        :closed? (atom false)}))))
+       (construct-local-model session
+                              #(tokenizers/from-file (.getPath tokenizer-file))
+                              resolved-opts
+                              #(.getInputNames ^OrtSession session)
+                              #(.getOutputNames ^OrtSession session))))))
 
 (defn close
   [model]
   (when (compare-and-set! (:closed? model) false true)
-    (.close ^OrtSession (:session model)))
+    (try
+      (.close ^java.lang.AutoCloseable (:tokenizer model))
+      (finally
+        (.close ^java.lang.AutoCloseable (:session model)))))
   nil)
 
 (defmacro with-model
@@ -234,17 +294,25 @@
        (finally
          (close ~sym)))))
 
-(defn dimension
+(defn- model-dimension
   ^long
   [model]
   (ensure-open model)
   (let [^OrtSession session (:session model)
         ^Map output-info (.getOutputInfo session)
-        ^java.util.Collection values (.values output-info)
-        ^java.util.Iterator iterator (.iterator values)
-        ^NodeInfo node (.next iterator)
-        ^longs shape (.getShape (tensor-info node))]
-    (long (aget shape (dec (alength shape))))))
+        ^NodeInfo node (.get output-info (:output-name model))
+        ^longs shape (.getShape (tensor-info node))
+        dimensions (long (aget shape (dec (alength shape))))
+        output-dimensions (:output-dimensions (:opts model))]
+    (if output-dimensions
+      (let [requested (long output-dimensions)]
+        (when (or (not (pos? requested)) (> requested dimensions))
+          (throw (model-error "invalid output dimensions"
+                              {:embeddings/error :invalid-output-dimensions
+                               :output-dimensions requested
+                               :dimensions dimensions})))
+        requested)
+      dimensions)))
 
 (defn- truncate-seq
   [xs ^long max-length]
@@ -258,7 +326,8 @@
         type-ids (truncate-seq (or (:type-ids encoded) (repeat (count ids) 0)) max-length)]
     {:ids ids
      :attention-mask mask
-     :type-ids type-ids}))
+     :type-ids type-ids
+     :position-ids (vec (range (count ids)))}))
 
 (defn- batch-seq-length
   ^long
@@ -289,52 +358,83 @@
                       {:embeddings/error :unsupported-input
                        :input name})))
 
+(def ^:private default-input-schema
+  {"input_ids" {:source :ids :pad-value 0}
+   "attention_mask" {:source :attention-mask :pad-value 0}
+   "token_type_ids" {:source :type-ids :pad-value 0}
+   "position_ids" {:source :position-ids :pad-value 0}})
+
+(defn- input-spec [schema name]
+  (let [spec (get schema name)]
+    (cond
+      (keyword? spec) {:source spec :pad-value 0}
+      (map? spec) spec
+      :else (unsupported-input name))))
+
 (defn- input-tensors
-  [^OrtEnvironment env input-names encoded]
-  (doseq [name input-names]
-    (when-not (#{"input_ids" "attention_mask" "token_type_ids"} name)
-      (unsupported-input name)))
-  (let [seq-length (batch-seq-length encoded)
-        ids (padded-matrix encoded :ids seq-length 0)
-        masks (padded-matrix encoded :attention-mask seq-length 0)
-        type-ids (padded-matrix encoded :type-ids seq-length 0)
-        inputs (HashMap.)
-        tensors (transient [])]
-    (doseq [name input-names]
-      (let [tensor (case name
-                     "input_ids" (OnnxTensor/createTensor env ids)
-                     "attention_mask" (OnnxTensor/createTensor env masks)
-                     "token_type_ids" (OnnxTensor/createTensor env type-ids))]
-        (.put inputs name tensor)
-        (conj! tensors tensor)))
-    {:inputs inputs
-     :tensors (persistent! tensors)
-     :masks masks}))
+  ([^OrtEnvironment env input-names encoded]
+   (input-tensors env input-names encoded nil))
+  ([^OrtEnvironment env input-names encoded input-schema]
+   (let [schema (merge default-input-schema input-schema)
+         seq-length (batch-seq-length encoded)
+         masks (padded-matrix encoded :attention-mask seq-length 0)
+         inputs (HashMap.)
+         tensors (transient [])]
+     (doseq [name input-names]
+       (let [{:keys [source pad-value]} (input-spec schema name)
+             values (padded-matrix encoded source seq-length (long (or pad-value 0)))
+             tensor (OnnxTensor/createTensor env values)]
+         (.put inputs name tensor)
+         (conj! tensors tensor)))
+     {:inputs inputs
+      :tensors (persistent! tensors)
+      :masks masks})))
 
 (defn- close-all
   [xs]
   (doseq [x xs]
     (.close ^java.lang.AutoCloseable x)))
 
+(defn- truncate-embedding
+  ^floats
+  [^floats embedding output-dimensions]
+  (if-not output-dimensions
+    embedding
+    (let [dimensions (alength embedding)
+          requested (long output-dimensions)]
+      (when (or (not (pos? requested)) (> requested dimensions))
+        (throw (model-error "invalid output dimensions"
+                            {:embeddings/error :invalid-output-dimensions
+                             :output-dimensions requested
+                             :dimensions dimensions})))
+      (let [out (float-array requested)]
+        (System/arraycopy embedding 0 out 0 requested)
+        out))))
+
 (defn- normalize-if-needed
-  [^floats embedding normalize?]
-  (if normalize?
-    (math/l2-normalize embedding)
-    embedding))
+  ([^floats embedding normalize?]
+   (normalize-if-needed embedding normalize? nil))
+  ([^floats embedding normalize? output-dimensions]
+   (let [embedding (truncate-embedding embedding output-dimensions)]
+     (if normalize?
+       (math/l2-normalize embedding)
+       embedding))))
 
 (defn- rank-3-embeddings
-  [^"[[[F" output ^"[[J" masks pooling normalize?]
+  [^"[[[F" output ^"[[J" masks opts]
   (let [batch-size (alength output)]
     (loop [i 0
            out []]
       (if (= i batch-size)
         out
-        (let [pooled (pooling/pool pooling (aget output i) (aget masks i))]
+        (let [pooled (pooling/pool (:pooling opts) (aget output i) (aget masks i))]
           (recur (inc i)
-                 (conj out (normalize-if-needed pooled normalize?))))))))
+                 (conj out (normalize-if-needed pooled
+                                                (:normalize? opts)
+                                                (:output-dimensions opts)))))))))
 
 (defn- rank-2-embeddings
-  [^"[[F" output normalize?]
+  [^"[[F" output opts]
   (let [batch-size (alength output)]
     (loop [i 0
            out []]
@@ -342,16 +442,18 @@
         out
         (let [row (aclone ^floats (aget output i))]
           (recur (inc i)
-                 (conj out (normalize-if-needed row normalize?))))))))
+                 (conj out (normalize-if-needed row
+                                                (:normalize? opts)
+                                                (:output-dimensions opts)))))))))
 
 (defn- output-embeddings
   [value masks opts]
   (cond
     (instance? (Class/forName "[[[F") value)
-    (rank-3-embeddings value masks (:pooling opts) (:normalize? opts))
+    (rank-3-embeddings value masks opts)
 
     (instance? (Class/forName "[[F") value)
-    (rank-2-embeddings value (:normalize? opts))
+    (rank-2-embeddings value opts)
 
     :else
     (throw (model-error "unsupported model output"
@@ -367,11 +469,17 @@
           max-length (long (:max-length opts))
           encoded (mapv #(encoded-row (:tokenizer model) % max-length) texts)
           env (OrtEnvironment/getEnvironment)
-          {:keys [^Map inputs tensors masks]} (input-tensors env (:input-names model) encoded)
+          {:keys [^Map inputs tensors masks]} (input-tensors env
+                                                              (:input-names model)
+                                                              encoded
+                                                              (:input-schema opts))
           ^OrtSession session (:session model)
           result (atom nil)]
       (try
-        (let [^OrtSession$Result run-result (.run session inputs)]
+        (let [^OrtSession$Result run-result (.run session
+                                                   inputs
+                                                   (Collections/singleton
+                                                    (:output-name model)))]
           (reset! result run-result)
           (let [^OnnxValue output (.get run-result 0)]
             (output-embeddings (.getValue output) masks opts)))
@@ -379,12 +487,3 @@
           (when-let [^OrtSession$Result run-result @result]
             (.close run-result))
           (close-all tensors))))))
-
-(defn embed-batch
-  ([model texts] (embed-batch model texts nil))
-  ([model texts {:keys [prefix]}]
-   (embed-batch* model (if prefix (mapv #(str prefix %) texts) texts))))
-
-(defn embed
-  ([model text] (embed model text nil))
-  ([model text opts] (first (embed-batch model [text] opts))))

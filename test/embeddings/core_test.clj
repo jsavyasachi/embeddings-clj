@@ -177,3 +177,151 @@
       (testing "nil/absent opts unchanged"
         (is (= (vec (embeddings/embed model "x"))
                (vec (embeddings/embed model "x" nil))))))))
+
+(deftest embedding-provider-protocol-test
+  (is (some? (ns-resolve 'embeddings.core 'EmbeddingProvider)))
+  (is (try
+        (require 'embeddings.providers)
+        true
+        (catch java.io.FileNotFoundException _
+          false))))
+
+(deftest named-output-and-position-input-api-test
+  (is (some? (ns-resolve 'embeddings.core 'selected-output-name)))
+  (let [input-tensors #'embeddings/input-tensors
+        encoded [{:ids [10 11]
+                  :attention-mask [1 1]
+                  :type-ids [0 0]
+                  :position-ids [0 1]}]]
+    (is (nil? (try
+                (let [{:keys [tensors]} (input-tensors
+                                         (ai.onnxruntime.OrtEnvironment/getEnvironment)
+                                         #{"position_ids"}
+                                         encoded)]
+                  (doseq [tensor tensors] (.close ^java.lang.AutoCloseable tensor))
+                  nil)
+                (catch clojure.lang.ExceptionInfo ex
+                  (ex-data ex)))))))
+
+(deftest named-output-selection-test
+  (let [select-output #'embeddings/selected-output-name]
+    (is (= "sentence_embedding"
+           (select-output ["token_embeddings" "sentence_embedding"]
+                          {:output-name "sentence_embedding"})))
+    (is (= "token_embeddings"
+           (select-output ["token_embeddings" "sentence_embedding"] {})))
+    (is (= {:embeddings/error :output-not-found
+            :output-name "missing"}
+           (try
+             (select-output ["token_embeddings"] {:output-name "missing"})
+             (catch clojure.lang.ExceptionInfo ex
+               (ex-data ex)))))))
+
+(deftest custom-input-schema-test
+  (let [input-tensors #'embeddings/input-tensors
+        encoded [{:ids [10 11]
+                  :attention-mask [1 1]
+                  :type-ids [0 0]
+                  :position-ids [0 1]}
+                 {:ids [12]
+                  :attention-mask [1]
+                  :type-ids [0]
+                  :position-ids [0]}]
+        result (try
+                 (input-tensors
+                  (ai.onnxruntime.OrtEnvironment/getEnvironment)
+                  #{"position_ids" "custom_ids"}
+                  encoded
+                  {"custom_ids" {:source :ids :pad-value 9}})
+                 (catch clojure.lang.ArityException _
+                   :unsupported))]
+    (is (not= :unsupported result))
+    (when (map? result)
+      (try
+        (is (= [[0 1] [0 0]]
+               (mapv vec (.getValue ^ai.onnxruntime.OnnxTensor
+                                    (.get ^java.util.Map (:inputs result)
+                                          "position_ids")))))
+        (is (= [[10 11] [12 9]]
+               (mapv vec (.getValue ^ai.onnxruntime.OnnxTensor
+                                    (.get ^java.util.Map (:inputs result)
+                                          "custom_ids")))))
+        (finally
+          (doseq [tensor (:tensors result)]
+            (.close ^java.lang.AutoCloseable tensor)))))))
+
+(deftest matryoshka-output-dimensions-test
+  (let [postprocess #'embeddings/normalize-if-needed
+        normalized (try
+                     (postprocess (farray 3.0 4.0 12.0) true 2)
+                     (catch clojure.lang.ArityException _
+                       :unsupported))]
+    (is (not= :unsupported normalized))
+    (when-not (= :unsupported normalized)
+      (is (approx= (farray 0.6 0.8) normalized))
+      (is (<= (Math/abs (- 1.0 (math/norm normalized))) epsilon))
+      (is (approx= (farray 3.0 4.0)
+                   (postprocess (farray 3.0 4.0 12.0) false 2)))
+      (is (= {:embeddings/error :invalid-output-dimensions
+              :output-dimensions 4
+              :dimensions 3}
+             (try
+               (postprocess (farray 3.0 4.0 12.0) true 4)
+               (catch clojure.lang.ExceptionInfo ex
+                 (ex-data ex))))))))
+
+(deftest close-releases-native-resources-once-test
+  (let [session-closes (atom 0)
+        tokenizer-closes (atom 0)
+        session (reify java.lang.AutoCloseable
+                  (close [_] (swap! session-closes inc)))
+        tokenizer (reify java.lang.AutoCloseable
+                    (close [_] (swap! tokenizer-closes inc)))
+        model (embeddings/->LocalModel session tokenizer {} #{} nil (atom false))
+        result (try
+                 (embeddings/close model)
+                 (embeddings/close model)
+                 :closed
+                 (catch Throwable _
+                   :failed))]
+    (is (= :closed result))
+    (is (= 1 @session-closes))
+    (is (= 1 @tokenizer-closes))))
+
+(deftest partial-model-construction-cleans-resources-test
+  (let [construct-model (ns-resolve 'embeddings.core 'construct-local-model)
+        session-closes (atom 0)
+        session (reify java.lang.AutoCloseable
+                  (close [_] (swap! session-closes inc)))
+        result (if construct-model
+                 (try
+                   (construct-model session
+                                    #(throw (ex-info "tokenizer failed" {}))
+                                    {}
+                                    #{"input_ids"}
+                                    ["output"])
+                   :unexpected-success
+                   (catch clojure.lang.ExceptionInfo _
+                     :failed-as-expected))
+                 :unsupported)]
+    (is (= :failed-as-expected result))
+    (is (= 1 @session-closes)))
+  (let [construct-model (ns-resolve 'embeddings.core 'construct-local-model)
+        session-closes (atom 0)
+        tokenizer-closes (atom 0)
+        session (reify java.lang.AutoCloseable
+                  (close [_] (swap! session-closes inc)))
+        tokenizer (reify java.lang.AutoCloseable
+                    (close [_] (swap! tokenizer-closes inc)))]
+    (when construct-model
+      (is (= :output-not-found
+             (try
+               (construct-model session
+                                (constantly tokenizer)
+                                {:output-name "missing"}
+                                #{"input_ids"}
+               ["output"])
+               (catch clojure.lang.ExceptionInfo ex
+                 (:embeddings/error (ex-data ex))))))
+      (is (= 1 @session-closes))
+      (is (= 1 @tokenizer-closes)))))
