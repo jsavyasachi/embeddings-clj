@@ -185,3 +185,67 @@
         true
         (catch java.io.FileNotFoundException _
           false))))
+
+(deftest named-output-and-position-input-api-test
+  (is (some? (ns-resolve 'embeddings.core 'selected-output-name)))
+  (let [input-tensors #'embeddings/input-tensors
+        encoded [{:ids [10 11]
+                  :attention-mask [1 1]
+                  :type-ids [0 0]
+                  :position-ids [0 1]}]]
+    (is (nil? (try
+                (let [{:keys [tensors]} (input-tensors
+                                         (ai.onnxruntime.OrtEnvironment/getEnvironment)
+                                         #{"position_ids"}
+                                         encoded)]
+                  (doseq [tensor tensors] (.close ^java.lang.AutoCloseable tensor))
+                  nil)
+                (catch clojure.lang.ExceptionInfo ex
+                  (ex-data ex)))))))
+
+(deftest named-output-selection-test
+  (let [select-output #'embeddings/selected-output-name]
+    (is (= "sentence_embedding"
+           (select-output ["token_embeddings" "sentence_embedding"]
+                          {:output-name "sentence_embedding"})))
+    (is (= "token_embeddings"
+           (select-output ["token_embeddings" "sentence_embedding"] {})))
+    (is (= {:embeddings/error :output-not-found
+            :output-name "missing"}
+           (try
+             (select-output ["token_embeddings"] {:output-name "missing"})
+             (catch clojure.lang.ExceptionInfo ex
+               (ex-data ex)))))))
+
+(deftest custom-input-schema-test
+  (let [input-tensors #'embeddings/input-tensors
+        encoded [{:ids [10 11]
+                  :attention-mask [1 1]
+                  :type-ids [0 0]
+                  :position-ids [0 1]}
+                 {:ids [12]
+                  :attention-mask [1]
+                  :type-ids [0]
+                  :position-ids [0]}]
+        result (try
+                 (input-tensors
+                  (ai.onnxruntime.OrtEnvironment/getEnvironment)
+                  #{"position_ids" "custom_ids"}
+                  encoded
+                  {"custom_ids" {:source :ids :pad-value 9}})
+                 (catch clojure.lang.ArityException _
+                   :unsupported))]
+    (is (not= :unsupported result))
+    (when (map? result)
+      (try
+        (is (= [[0 1] [0 0]]
+               (mapv vec (.getValue ^ai.onnxruntime.OnnxTensor
+                                    (.get ^java.util.Map (:inputs result)
+                                          "position_ids")))))
+        (is (= [[10 11] [12 9]]
+               (mapv vec (.getValue ^ai.onnxruntime.OnnxTensor
+                                    (.get ^java.util.Map (:inputs result)
+                                          "custom_ids")))))
+        (finally
+          (doseq [tensor (:tensors result)]
+            (.close ^java.lang.AutoCloseable tensor)))))))

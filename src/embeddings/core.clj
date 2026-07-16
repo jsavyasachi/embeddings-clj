@@ -27,7 +27,7 @@
 
 (declare embed-batch* model-dimension)
 
-(defrecord LocalModel [session tokenizer opts input-names closed?]
+(defrecord LocalModel [session tokenizer opts input-names output-name closed?]
   EmbeddingProvider
   (embed [model text]
     (embed model text nil))
@@ -154,6 +154,16 @@
       (throw (model-error "model output is not a tensor"
                           {:embeddings/error :unsupported-output})))))
 
+(defn- selected-output-name
+  [output-names {:keys [output-name]}]
+  (if output-name
+    (if (contains? (set output-names) output-name)
+      output-name
+      (throw (model-error "model output not found"
+                          {:embeddings/error :output-not-found
+                           :output-name output-name})))
+    (first output-names)))
+
 (defn- provider-name [provider]
   (if (map? provider) (:provider provider) provider))
 
@@ -239,6 +249,8 @@
                      (tokenizers/from-file (.getPath tokenizer-file))
                      resolved-opts
                      (set (.getInputNames ^OrtSession session))
+                     (selected-output-name (.getOutputNames ^OrtSession session)
+                                           resolved-opts)
                      (atom false))))))
 
 (defn close
@@ -261,9 +273,7 @@
   (ensure-open model)
   (let [^OrtSession session (:session model)
         ^Map output-info (.getOutputInfo session)
-        ^java.util.Collection values (.values output-info)
-        ^java.util.Iterator iterator (.iterator values)
-        ^NodeInfo node (.next iterator)
+        ^NodeInfo node (.get output-info (:output-name model))
         ^longs shape (.getShape (tensor-info node))]
     (long (aget shape (dec (alength shape))))))
 
@@ -279,7 +289,8 @@
         type-ids (truncate-seq (or (:type-ids encoded) (repeat (count ids) 0)) max-length)]
     {:ids ids
      :attention-mask mask
-     :type-ids type-ids}))
+     :type-ids type-ids
+     :position-ids (vec (range (count ids)))}))
 
 (defn- batch-seq-length
   ^long
@@ -310,27 +321,37 @@
                       {:embeddings/error :unsupported-input
                        :input name})))
 
+(def ^:private default-input-schema
+  {"input_ids" {:source :ids :pad-value 0}
+   "attention_mask" {:source :attention-mask :pad-value 0}
+   "token_type_ids" {:source :type-ids :pad-value 0}
+   "position_ids" {:source :position-ids :pad-value 0}})
+
+(defn- input-spec [schema name]
+  (let [spec (get schema name)]
+    (cond
+      (keyword? spec) {:source spec :pad-value 0}
+      (map? spec) spec
+      :else (unsupported-input name))))
+
 (defn- input-tensors
-  [^OrtEnvironment env input-names encoded]
-  (doseq [name input-names]
-    (when-not (#{"input_ids" "attention_mask" "token_type_ids"} name)
-      (unsupported-input name)))
-  (let [seq-length (batch-seq-length encoded)
-        ids (padded-matrix encoded :ids seq-length 0)
-        masks (padded-matrix encoded :attention-mask seq-length 0)
-        type-ids (padded-matrix encoded :type-ids seq-length 0)
-        inputs (HashMap.)
-        tensors (transient [])]
-    (doseq [name input-names]
-      (let [tensor (case name
-                     "input_ids" (OnnxTensor/createTensor env ids)
-                     "attention_mask" (OnnxTensor/createTensor env masks)
-                     "token_type_ids" (OnnxTensor/createTensor env type-ids))]
-        (.put inputs name tensor)
-        (conj! tensors tensor)))
-    {:inputs inputs
-     :tensors (persistent! tensors)
-     :masks masks}))
+  ([^OrtEnvironment env input-names encoded]
+   (input-tensors env input-names encoded nil))
+  ([^OrtEnvironment env input-names encoded input-schema]
+   (let [schema (merge default-input-schema input-schema)
+         seq-length (batch-seq-length encoded)
+         masks (padded-matrix encoded :attention-mask seq-length 0)
+         inputs (HashMap.)
+         tensors (transient [])]
+     (doseq [name input-names]
+       (let [{:keys [source pad-value]} (input-spec schema name)
+             values (padded-matrix encoded source seq-length (long (or pad-value 0)))
+             tensor (OnnxTensor/createTensor env values)]
+         (.put inputs name tensor)
+         (conj! tensors tensor)))
+     {:inputs inputs
+      :tensors (persistent! tensors)
+      :masks masks})))
 
 (defn- close-all
   [xs]
@@ -388,11 +409,17 @@
           max-length (long (:max-length opts))
           encoded (mapv #(encoded-row (:tokenizer model) % max-length) texts)
           env (OrtEnvironment/getEnvironment)
-          {:keys [^Map inputs tensors masks]} (input-tensors env (:input-names model) encoded)
+          {:keys [^Map inputs tensors masks]} (input-tensors env
+                                                              (:input-names model)
+                                                              encoded
+                                                              (:input-schema opts))
           ^OrtSession session (:session model)
           result (atom nil)]
       (try
-        (let [^OrtSession$Result run-result (.run session inputs)]
+        (let [^OrtSession$Result run-result (.run session
+                                                   inputs
+                                                   (Collections/singleton
+                                                    (:output-name model)))]
           (reset! result run-result)
           (let [^OnnxValue output (.get run-result 0)]
             (output-embeddings (.getValue output) masks opts)))
