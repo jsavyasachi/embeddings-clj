@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.4] - 2026-07-16
+### Changed
+- Update tokenizers-clj to 0.1.3.
+### Fixed
+- Honor SentenceTransformers model configuration (`modules.json`, `config.json`, pooling config) for pooling mode, normalization, and max sequence length instead of hardcoded defaults.
+
+## [0.3.3] - 2026-07-16
+### Fixed
+- Honor SentenceTransformers model configuration (`modules.json`, `config.json`, pooling config) for pooling mode, normalization, and max sequence length instead of hardcoded defaults.
+
 ## [0.3.2] - 2026-07-09
 ### Changed
 - Reorganized the README into a cljdoc article tree under `doc/` (Getting a model, Usage). Documentation content is unchanged; no API changes.
