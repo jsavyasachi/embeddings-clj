@@ -4,8 +4,8 @@
 [![cljdoc](https://cljdoc.org/badge/net.clojars.savya/embeddings-clj)](https://cljdoc.org/d/net.clojars.savya/embeddings-clj/CURRENT)
 [![test](https://github.com/jsavyasachi/embeddings-clj/actions/workflows/test.yml/badge.svg)](https://github.com/jsavyasachi/embeddings-clj/actions/workflows/test.yml)
 
-Local text-embedding inference for Clojure. Runs sentence-transformers ONNX
-exports on the JVM via ONNX Runtime.
+Text embeddings for Clojure, using local sentence-transformers ONNX exports or
+hosted OpenAI, Cohere, and Voyage models.
 
 ## Stack
 
@@ -18,14 +18,59 @@ exports on the JVM via ONNX Runtime.
 deps.edn:
 
 ```clojure
-net.clojars.savya/embeddings-clj {:mvn/version "0.3.0"}
+net.clojars.savya/embeddings-clj {:mvn/version "0.4.0"}
 ```
 
 Leiningen:
 
 ```clojure
-[net.clojars.savya/embeddings-clj "0.3.0"]
+[net.clojars.savya/embeddings-clj "0.4.0"]
 ```
+
+## Providers
+
+Local and hosted models implement `embeddings.core/EmbeddingProvider`, with
+`embed`, `embed-batch`, and `dimension` operations.
+
+```clojure
+(require '[embeddings.core :as emb]
+         '[embeddings.providers :as providers])
+
+(def openai
+  (providers/openai {:api-key (System/getenv "OPENAI_API_KEY")
+                     :model "text-embedding-3-small"
+                     :dimensions 512}))
+
+(emb/embed openai "A sentence to embed")
+
+(def cohere
+  (providers/cohere {:api-key (System/getenv "COHERE_API_KEY")
+                     :model "embed-v4.0"
+                     :input-type "search_document"}))
+
+(def voyage
+  (providers/voyage {:api-key (System/getenv "VOYAGE_API_KEY")
+                     :model "voyage-3-large"
+                     :input-type "query"}))
+```
+
+Hosted provider options include `:api-key`, `:model`, `:dimensions`,
+`:batch-size` (default `128`), `:url` for an endpoint override, and
+`:transport` for an injectable request function. Cohere and Voyage also accept
+`:input-type`. The transport receives `{:url :method :headers :body}` and must
+return `{:status :body}`.
+
+## Local model options
+
+`embeddings.core/load-model` accepts the existing pooling, normalization,
+maximum-length, and execution-provider options, plus:
+
+- `:output-name`: select a named ONNX graph output.
+- `:input-schema`: map custom ONNX input names to an encoded source keyword or
+  `{:source keyword :pad-value number}`. Built-in inputs include `input_ids`,
+  `attention_mask`, `token_type_ids`, and `position_ids`.
+- `:output-dimensions`: truncate Matryoshka embeddings to a positive dimension
+  no larger than the model output. Truncation happens before normalization.
 
 ## Documentation
 

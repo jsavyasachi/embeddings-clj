@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0] - 2026-07-16
+### Added
+- Add a shared embedding-provider protocol with hosted OpenAI, Cohere, and Voyage adapters using JDK HttpClient and injectable transports.
+- Support named ONNX output selection, `position_ids`, and custom input schemas.
+- Add Matryoshka `:output-dimensions` truncation.
+### Fixed
+- Close native model handles when models are closed or loading fails.
+
 ## [0.3.4] - 2026-07-16
 ### Changed
 - Update tokenizers-clj to 0.1.3.
