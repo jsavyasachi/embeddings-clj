@@ -269,3 +269,59 @@
                (postprocess (farray 3.0 4.0 12.0) true 4)
                (catch clojure.lang.ExceptionInfo ex
                  (ex-data ex))))))))
+
+(deftest close-releases-native-resources-once-test
+  (let [session-closes (atom 0)
+        tokenizer-closes (atom 0)
+        session (reify java.lang.AutoCloseable
+                  (close [_] (swap! session-closes inc)))
+        tokenizer (reify java.lang.AutoCloseable
+                    (close [_] (swap! tokenizer-closes inc)))
+        model (embeddings/->LocalModel session tokenizer {} #{} nil (atom false))
+        result (try
+                 (embeddings/close model)
+                 (embeddings/close model)
+                 :closed
+                 (catch Throwable _
+                   :failed))]
+    (is (= :closed result))
+    (is (= 1 @session-closes))
+    (is (= 1 @tokenizer-closes))))
+
+(deftest partial-model-construction-cleans-resources-test
+  (let [construct-model (ns-resolve 'embeddings.core 'construct-local-model)
+        session-closes (atom 0)
+        session (reify java.lang.AutoCloseable
+                  (close [_] (swap! session-closes inc)))
+        result (if construct-model
+                 (try
+                   (construct-model session
+                                    #(throw (ex-info "tokenizer failed" {}))
+                                    {}
+                                    #{"input_ids"}
+                                    ["output"])
+                   :unexpected-success
+                   (catch clojure.lang.ExceptionInfo _
+                     :failed-as-expected))
+                 :unsupported)]
+    (is (= :failed-as-expected result))
+    (is (= 1 @session-closes)))
+  (let [construct-model (ns-resolve 'embeddings.core 'construct-local-model)
+        session-closes (atom 0)
+        tokenizer-closes (atom 0)
+        session (reify java.lang.AutoCloseable
+                  (close [_] (swap! session-closes inc)))
+        tokenizer (reify java.lang.AutoCloseable
+                    (close [_] (swap! tokenizer-closes inc)))]
+    (when construct-model
+      (is (= :output-not-found
+             (try
+               (construct-model session
+                                (constantly tokenizer)
+                                {:output-name "missing"}
+                                #{"input_ids"}
+               ["output"])
+               (catch clojure.lang.ExceptionInfo ex
+                 (:embeddings/error (ex-data ex))))))
+      (is (= 1 @session-closes))
+      (is (= 1 @tokenizer-closes)))))

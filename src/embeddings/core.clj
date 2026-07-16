@@ -211,6 +211,32 @@
 (defn- first-provider [execution-providers]
   (provider-name (first execution-providers)))
 
+(defn- close-on-failure!
+  [cause resources]
+  (doseq [resource resources]
+    (when resource
+      (try
+        (.close ^java.lang.AutoCloseable resource)
+        (catch Throwable cleanup-error
+          (.addSuppressed ^Throwable cause cleanup-error)))))
+  (throw cause))
+
+(defn- construct-local-model
+  [session tokenizer-loader resolved-opts input-names output-names]
+  (let [tokenizer (atom nil)]
+    (try
+      (reset! tokenizer (tokenizer-loader))
+      (->LocalModel session
+                    @tokenizer
+                    resolved-opts
+                    (set (if (fn? input-names) (input-names) input-names))
+                    (selected-output-name
+                     (if (fn? output-names) (output-names) output-names)
+                     resolved-opts)
+                    (atom false))
+      (catch Throwable ex
+        (close-on-failure! ex [@tokenizer session])))))
+
 (defn load-model
   "Load a local model directory containing `model.onnx` and `tokenizer.json`.
 
@@ -245,18 +271,19 @@
                        (finally
                          (.close ^OrtSession$SessionOptions session-options)))
                      (.createSession ^OrtEnvironment env (.getPath model-file)))]
-       (->LocalModel session
-                     (tokenizers/from-file (.getPath tokenizer-file))
-                     resolved-opts
-                     (set (.getInputNames ^OrtSession session))
-                     (selected-output-name (.getOutputNames ^OrtSession session)
-                                           resolved-opts)
-                     (atom false))))))
+       (construct-local-model session
+                              #(tokenizers/from-file (.getPath tokenizer-file))
+                              resolved-opts
+                              #(.getInputNames ^OrtSession session)
+                              #(.getOutputNames ^OrtSession session))))))
 
 (defn close
   [model]
   (when (compare-and-set! (:closed? model) false true)
-    (.close ^OrtSession (:session model)))
+    (try
+      (.close ^java.lang.AutoCloseable (:tokenizer model))
+      (finally
+        (.close ^java.lang.AutoCloseable (:session model)))))
   nil)
 
 (defmacro with-model
