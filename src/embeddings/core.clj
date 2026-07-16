@@ -1,11 +1,14 @@
 (ns embeddings.core
-  (:require [embeddings.math :as math]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
+            [embeddings.math :as math]
             [embeddings.pooling :as pooling]
             [tokenizers.core :as tokenizers])
   (:import (ai.onnxruntime NodeInfo OnnxTensor OnnxValue OrtEnvironment OrtSession
                            OrtException TensorInfo)
            (ai.onnxruntime OrtSession$Result)
            (ai.onnxruntime OrtSession$SessionOptions)
+           (com.google.gson JsonElement JsonObject JsonParser)
            (java.io File)
            (java.util Collections HashMap Map)))
 
@@ -27,6 +30,93 @@
                     model-dir
                     (File. ^String model-dir))]
     (File. dir ^String child)))
+
+(defn- read-json
+  ^JsonElement
+  [^File file]
+  (when (.isFile file)
+    (with-open [reader (io/reader file)]
+      (JsonParser/parseReader reader))))
+
+(defn- json-object
+  ^JsonObject
+  [^JsonElement element]
+  (when (and element (.isJsonObject element))
+    (.getAsJsonObject element)))
+
+(defn- json-value
+  ^JsonElement
+  [^JsonObject object ^String key]
+  (when (and object (.has object key))
+    (.get object key)))
+
+(defn- json-string
+  [^JsonObject object ^String key]
+  (some-> (json-value object key) .getAsString))
+
+(defn- json-boolean
+  [^JsonObject object ^String key]
+  (some-> (json-value object key) .getAsBoolean))
+
+(defn- json-long
+  [^JsonObject object ^String key]
+  (some-> (json-value object key) .getAsLong))
+
+(defn- modules
+  [^JsonElement modules-json]
+  (when (and modules-json (.isJsonArray modules-json))
+    (map #(.getAsJsonObject ^JsonElement %)
+         (iterator-seq (.iterator (.getAsJsonArray modules-json))))))
+
+(defn- module-type?
+  [^JsonObject module ^String suffix]
+  (some-> (json-string module "type") (str/ends-with? suffix)))
+
+(defn- pooling-module-config
+  ^File
+  [model-dir model-modules]
+  (when-let [path (some #(when (module-type? % ".Pooling")
+                           (json-string % "path"))
+                        model-modules)]
+    (let [^File root (.getCanonicalFile (file-in model-dir ""))
+          ^File module-dir (.getCanonicalFile (File. root ^String path))]
+      (when-not (.startsWith (.toPath module-dir) (.toPath root))
+        (throw (model-error "pooling module path escapes model directory"
+                            {:embeddings/error :invalid-model-config
+                             :path path})))
+      (File. module-dir "config.json"))))
+
+(def ^:private pooling-config-keys
+  [[:cls "pooling_mode_cls_token"]
+   [:mean "pooling_mode_mean_tokens"]
+   [:max "pooling_mode_max_tokens"]
+   [:mean-sqrt-len "pooling_mode_mean_sqrt_len_tokens"]])
+
+(defn- configured-pooling
+  [^JsonObject config]
+  (or (some-> (json-string config "pooling_mode") keyword)
+      (some (fn [[strategy key]]
+              (when (true? (json-boolean config key)) strategy))
+            pooling-config-keys)))
+
+(defn- model-config-opts
+  [model-dir]
+  (let [modules-json (read-json (file-in model-dir "modules.json"))
+        model-modules (modules modules-json)
+        root-config (json-object (read-json (file-in model-dir "config.json")))
+        sentence-config (json-object
+                         (read-json (file-in model-dir "sentence_bert_config.json")))
+        pooling-config (some-> (pooling-module-config model-dir model-modules)
+                               read-json
+                               json-object)
+        pooling (configured-pooling pooling-config)
+        max-length (or (json-long sentence-config "max_seq_length")
+                       (json-long root-config "max_position_embeddings"))]
+    (cond-> {}
+      modules-json (assoc :normalize? (boolean (some #(module-type? % ".Normalize")
+                                                     model-modules)))
+      pooling (assoc :pooling pooling)
+      max-length (assoc :max-length max-length))))
 
 (defn- ensure-open
   [model]
@@ -111,7 +201,8 @@
        (throw (model-error "tokenizer.json not found"
                            {:embeddings/error :tokenizer-not-found
                             :path (.getPath tokenizer-file)})))
-     (let [env (OrtEnvironment/getEnvironment)
+     (let [resolved-opts (merge default-opts (model-config-opts model-dir) opts)
+           env (OrtEnvironment/getEnvironment)
            session-options (->session-options (:execution-providers opts))
            session (if session-options
                      (try
@@ -125,7 +216,7 @@
                      (.createSession ^OrtEnvironment env (.getPath model-file)))]
        {:session session
         :tokenizer (tokenizers/from-file (.getPath tokenizer-file))
-        :opts (merge default-opts opts)
+        :opts resolved-opts
         :input-names (set (.getInputNames ^OrtSession session))
         :closed? (atom false)}))))
 
