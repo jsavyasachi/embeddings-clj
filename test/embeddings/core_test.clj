@@ -1,7 +1,9 @@
 (ns embeddings.core-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.java.io :as io]
+            [clojure.test :refer [deftest is testing]]
             [embeddings.core :as embeddings]
-            [embeddings.math :as math]))
+            [embeddings.math :as math])
+  (:import (java.nio.file Files StandardCopyOption)))
 
 (set! *warn-on-reflection* true)
 
@@ -28,6 +30,49 @@
   `(if fixtures-present?
      (do ~@body)
      (is true "fixtures absent; skipping ONNX corpus test")))
+
+(defn- configured-model-dir []
+  (let [dir (.toFile (Files/createTempDirectory
+                      "configured-model"
+                      (make-array java.nio.file.attribute.FileAttribute 0)))
+        source (io/file "fixtures/token-model")]
+    (doseq [filename ["model.onnx" "tokenizer.json"]]
+      (Files/copy (.toPath (io/file source filename))
+                  (.toPath (io/file dir filename))
+                  ^"[Ljava.nio.file.CopyOption;"
+                  (into-array StandardCopyOption
+                              [StandardCopyOption/REPLACE_EXISTING])))
+    (spit (io/file dir "modules.json")
+          "[{
+             \"idx\": 0,
+             \"path\": \"\",
+             \"type\": \"sentence_transformers.models.Transformer\"
+           }, {
+             \"idx\": 1,
+             \"path\": \"1_Pooling\",
+             \"type\": \"sentence_transformers.models.Pooling\"
+           }]")
+    (spit (io/file dir "config.json") "{\"max_position_embeddings\": 256}")
+    (spit (io/file dir "sentence_bert_config.json") "{\"max_seq_length\": 128}")
+    (doto (io/file dir "1_Pooling") .mkdir)
+    (spit (io/file dir "1_Pooling" "config.json")
+          "{\"pooling_mode_cls_token\": true,
+            \"pooling_mode_mean_tokens\": false,
+            \"pooling_mode_max_tokens\": false,
+            \"pooling_mode_mean_sqrt_len_tokens\": false}")
+    dir))
+
+(deftest load-model-resolves-sentence-transformers-config-test
+  (when-fixtures
+    (let [dir (configured-model-dir)]
+      (embeddings/with-model [model dir nil]
+        (is (= {:pooling :cls :normalize? false :max-length 128}
+               (select-keys (:opts model) [:pooling :normalize? :max-length]))))
+      (embeddings/with-model [model dir {:pooling :max
+                                         :normalize? true
+                                         :max-length 64}]
+        (is (= {:pooling :max :normalize? true :max-length 64}
+               (select-keys (:opts model) [:pooling :normalize? :max-length])))))))
 
 (deftest load-model-test
   (when-fixtures
