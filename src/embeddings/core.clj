@@ -274,8 +274,18 @@
   (let [^OrtSession session (:session model)
         ^Map output-info (.getOutputInfo session)
         ^NodeInfo node (.get output-info (:output-name model))
-        ^longs shape (.getShape (tensor-info node))]
-    (long (aget shape (dec (alength shape))))))
+        ^longs shape (.getShape (tensor-info node))
+        dimensions (long (aget shape (dec (alength shape))))
+        output-dimensions (:output-dimensions (:opts model))]
+    (if output-dimensions
+      (let [requested (long output-dimensions)]
+        (when (or (not (pos? requested)) (> requested dimensions))
+          (throw (model-error "invalid output dimensions"
+                              {:embeddings/error :invalid-output-dimensions
+                               :output-dimensions requested
+                               :dimensions dimensions})))
+        requested)
+      dimensions)))
 
 (defn- truncate-seq
   [xs ^long max-length]
@@ -358,25 +368,46 @@
   (doseq [x xs]
     (.close ^java.lang.AutoCloseable x)))
 
+(defn- truncate-embedding
+  ^floats
+  [^floats embedding output-dimensions]
+  (if-not output-dimensions
+    embedding
+    (let [dimensions (alength embedding)
+          requested (long output-dimensions)]
+      (when (or (not (pos? requested)) (> requested dimensions))
+        (throw (model-error "invalid output dimensions"
+                            {:embeddings/error :invalid-output-dimensions
+                             :output-dimensions requested
+                             :dimensions dimensions})))
+      (let [out (float-array requested)]
+        (System/arraycopy embedding 0 out 0 requested)
+        out))))
+
 (defn- normalize-if-needed
-  [^floats embedding normalize?]
-  (if normalize?
-    (math/l2-normalize embedding)
-    embedding))
+  ([^floats embedding normalize?]
+   (normalize-if-needed embedding normalize? nil))
+  ([^floats embedding normalize? output-dimensions]
+   (let [embedding (truncate-embedding embedding output-dimensions)]
+     (if normalize?
+       (math/l2-normalize embedding)
+       embedding))))
 
 (defn- rank-3-embeddings
-  [^"[[[F" output ^"[[J" masks pooling normalize?]
+  [^"[[[F" output ^"[[J" masks opts]
   (let [batch-size (alength output)]
     (loop [i 0
            out []]
       (if (= i batch-size)
         out
-        (let [pooled (pooling/pool pooling (aget output i) (aget masks i))]
+        (let [pooled (pooling/pool (:pooling opts) (aget output i) (aget masks i))]
           (recur (inc i)
-                 (conj out (normalize-if-needed pooled normalize?))))))))
+                 (conj out (normalize-if-needed pooled
+                                                (:normalize? opts)
+                                                (:output-dimensions opts)))))))))
 
 (defn- rank-2-embeddings
-  [^"[[F" output normalize?]
+  [^"[[F" output opts]
   (let [batch-size (alength output)]
     (loop [i 0
            out []]
@@ -384,16 +415,18 @@
         out
         (let [row (aclone ^floats (aget output i))]
           (recur (inc i)
-                 (conj out (normalize-if-needed row normalize?))))))))
+                 (conj out (normalize-if-needed row
+                                                (:normalize? opts)
+                                                (:output-dimensions opts)))))))))
 
 (defn- output-embeddings
   [value masks opts]
   (cond
     (instance? (Class/forName "[[[F") value)
-    (rank-3-embeddings value masks (:pooling opts) (:normalize? opts))
+    (rank-3-embeddings value masks opts)
 
     (instance? (Class/forName "[[F") value)
-    (rank-2-embeddings value (:normalize? opts))
+    (rank-2-embeddings value opts)
 
     :else
     (throw (model-error "unsupported model output"

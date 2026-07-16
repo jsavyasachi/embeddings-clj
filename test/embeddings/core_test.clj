@@ -249,3 +249,23 @@
         (finally
           (doseq [tensor (:tensors result)]
             (.close ^java.lang.AutoCloseable tensor)))))))
+
+(deftest matryoshka-output-dimensions-test
+  (let [postprocess #'embeddings/normalize-if-needed
+        normalized (try
+                     (postprocess (farray 3.0 4.0 12.0) true 2)
+                     (catch clojure.lang.ArityException _
+                       :unsupported))]
+    (is (not= :unsupported normalized))
+    (when-not (= :unsupported normalized)
+      (is (approx= (farray 0.6 0.8) normalized))
+      (is (<= (Math/abs (- 1.0 (math/norm normalized))) epsilon))
+      (is (approx= (farray 3.0 4.0)
+                   (postprocess (farray 3.0 4.0 12.0) false 2)))
+      (is (= {:embeddings/error :invalid-output-dimensions
+              :output-dimensions 4
+              :dimensions 3}
+             (try
+               (postprocess (farray 3.0 4.0 12.0) true 4)
+               (catch clojure.lang.ExceptionInfo ex
+                 (ex-data ex))))))))
