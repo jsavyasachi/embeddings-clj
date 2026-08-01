@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.0] - 2026-08-01
+### Changed
+- Move JSON handling to `org.clojure/data.json`.
+### Fixed
+- Remove the undeclared transitive Gson dependency and fix the cljdoc API build.
+
 ## [0.4.0] - 2026-07-16
 ### Added
 - Add a shared embedding-provider protocol with hosted OpenAI, Cohere, and Voyage adapters using JDK HttpClient and injectable transports.
