@@ -1,5 +1,6 @@
 (ns embeddings.core
   (:require [clojure.java.io :as io]
+            [clojure.data.json :as json]
             [clojure.string :as str]
             [embeddings.math :as math]
             [embeddings.pooling :as pooling]
@@ -8,7 +9,6 @@
                            OrtException TensorInfo)
            (ai.onnxruntime OrtSession$Result)
            (ai.onnxruntime OrtSession$SessionOptions)
-           (com.google.gson JsonElement JsonObject JsonParser)
            (java.io File)
            (java.util Collections HashMap Map)))
 
@@ -53,44 +53,37 @@
     (File. dir ^String child)))
 
 (defn- read-json
-  ^JsonElement
   [^File file]
   (when (.isFile file)
     (with-open [reader (io/reader file)]
-      (JsonParser/parseReader reader))))
+      (json/read reader))))
 
 (defn- json-object
-  ^JsonObject
-  [^JsonElement element]
-  (when (and element (.isJsonObject element))
-    (.getAsJsonObject element)))
+  [element]
+  (when (map? element) element))
 
 (defn- json-value
-  ^JsonElement
-  [^JsonObject object ^String key]
-  (when (and object (.has object key))
-    (.get object key)))
+  [object key]
+  (get object key))
 
 (defn- json-string
-  [^JsonObject object ^String key]
-  (some-> (json-value object key) .getAsString))
+  [object key]
+  (some-> (json-value object key) str))
 
 (defn- json-boolean
-  [^JsonObject object ^String key]
-  (some-> (json-value object key) .getAsBoolean))
+  [object key]
+  (json-value object key))
 
 (defn- json-long
-  [^JsonObject object ^String key]
-  (some-> (json-value object key) .getAsLong))
+  [object key]
+  (some-> (json-value object key) long))
 
 (defn- modules
-  [^JsonElement modules-json]
-  (when (and modules-json (.isJsonArray modules-json))
-    (map #(.getAsJsonObject ^JsonElement %)
-         (iterator-seq (.iterator (.getAsJsonArray modules-json))))))
+  [modules-json]
+  (when (vector? modules-json) modules-json))
 
 (defn- module-type?
-  [^JsonObject module ^String suffix]
+  [module suffix]
   (some-> (json-string module "type") (str/ends-with? suffix)))
 
 (defn- pooling-module-config
@@ -114,7 +107,7 @@
    [:mean-sqrt-len "pooling_mode_mean_sqrt_len_tokens"]])
 
 (defn- configured-pooling
-  [^JsonObject config]
+  [config]
   (or (some-> (json-string config "pooling_mode") keyword)
       (some (fn [[strategy key]]
               (when (true? (json-boolean config key)) strategy))

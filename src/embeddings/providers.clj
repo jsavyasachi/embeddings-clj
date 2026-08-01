@@ -1,14 +1,12 @@
 (ns embeddings.providers
   "Hosted embedding providers implementing `embeddings.core/EmbeddingProvider`."
-  (:require [embeddings.core :as embeddings])
-  (:import (com.google.gson Gson JsonArray JsonElement JsonObject JsonParser)
-           (java.net URI)
+  (:require [clojure.data.json :as json]
+            [embeddings.core :as embeddings])
+  (:import (java.net URI)
            (java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
                           HttpResponse$BodyHandlers)))
 
 (set! *warn-on-reflection* true)
-
-(def ^:private ^Gson gson (Gson.))
 
 (defn- default-transport
   [{:keys [url method headers body]}]
@@ -25,50 +23,41 @@
        :body (.body response)})))
 
 (defn- json-map [value]
-  (.toJson gson value))
+  (json/write-str value))
 
 (defn- parse-object
-  ^JsonObject
   [^String body]
-  (.getAsJsonObject (JsonParser/parseString body)))
+  (json/read-str body))
 
 (defn- object-value
-  ^JsonElement
-  [^JsonObject object ^String key]
-  (.get object key))
+  [object key]
+  (get object key))
 
 (defn- object
-  ^JsonObject
-  [^JsonObject parent ^String key]
-  (.getAsJsonObject (object-value parent key)))
+  [parent key]
+  (object-value parent key))
 
 (defn- array
-  ^JsonArray
-  [^JsonObject parent ^String key]
-  (.getAsJsonArray (object-value parent key)))
+  [parent key]
+  (object-value parent key))
 
 (defn- float-vector
   ^floats
-  [^JsonArray values]
-  (float-array
-   (map #(.getAsFloat ^JsonElement %)
-        (iterator-seq (.iterator values)))))
+  [values]
+  (float-array (map float values)))
 
 (defn- indexed-response
-  [^JsonObject response]
-  (->> (iterator-seq (.iterator (array response "data")))
-       (map (fn [^JsonElement element]
-              (let [entry (.getAsJsonObject element)]
-                [(.getAsInt (object-value entry "index"))
-                 (float-vector (array entry "embedding"))])))
+  [response]
+  (->> (array response "data")
+       (map (fn [entry]
+              [(int (object-value entry "index"))
+               (float-vector (array entry "embedding"))]))
        (sort-by first)
        (mapv second)))
 
 (defn- cohere-response
-  [^JsonObject response]
-  (mapv (fn [^JsonElement element]
-          (float-vector (.getAsJsonArray element)))
-        (iterator-seq (.iterator (array (object response "embeddings") "float")))))
+  [response]
+  (mapv float-vector (array (object response "embeddings") "float")))
 
 (defn- endpoint [provider opts]
   (or (:url opts)
