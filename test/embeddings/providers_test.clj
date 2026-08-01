@@ -16,6 +16,11 @@
 (defn- vectors [embeddings]
   (mapv vec embeddings))
 
+(deftest json-parsing-does-not-import-gson-test
+  (is (not-any? #(-> ^Class % .getName (.startsWith "com.google.gson."))
+                (concat (vals (ns-imports 'embeddings.core))
+                        (vals (ns-imports 'embeddings.providers))))))
+
 (deftest openai-request-and-response-test
   (let [requests (atom [])
         transport (fn [request]
