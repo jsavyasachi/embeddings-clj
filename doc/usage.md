@@ -19,7 +19,7 @@
 ;; => [float[384] float[384] float[384]]
 ```
 
-Options to `load-model` (defaults shown):
+Options for `load-model` with default values:
 
 | option | default | meaning |
 |---|---|---|
@@ -28,18 +28,19 @@ Options to `load-model` (defaults shown):
 | `:max-length` | `512` | truncate inputs to this many tokens |
 | `:execution-providers` | none (CPU) | ONNX Runtime execution providers to try, e.g. `[:coreml]` or `[{:provider :cuda :device-id 0}]`; also `:rocm`, `:tensorrt`, `:directml`, `:xnnpack` |
 
-Execution providers require an onnxruntime build that bundles them (the
-default `com.microsoft.onnxruntime/onnxruntime` artifact is CPU-only; CUDA
-needs `onnxruntime_gpu`). Requesting a provider the runtime lacks throws
-`ex-info` with `{:embeddings/error :execution-provider-unavailable}`.
+Execution providers need an onnxruntime build that includes them. The default
+`com.microsoft.onnxruntime/onnxruntime` artifact is CPU-only, and CUDA needs
+`onnxruntime_gpu`. If you request a provider that the runtime does not supply,
+the library throws `ex-info` with
+`{:embeddings/error :execution-provider-unavailable}`.
 
-Models whose ONNX graph already outputs a pooled `[batch, hidden]` sentence
-embedding are detected automatically and used as-is (`:pooling` is ignored).
+Some ONNX graphs already output a pooled `[batch, hidden]` sentence embedding.
+The library detects these models automatically and ignores `:pooling`.
 
-`embeddings.math` ships the small vector toolkit: `dot`, `norm`,
-`l2-normalize`, `cosine-similarity` - all on primitive `float[]`.
+`embeddings.math` supplies the small vector functions: `dot`, `norm`,
+`l2-normalize`, and `cosine-similarity`. All of them operate on primitive
+`float[]`.
 
 Errors are `ex-info` maps keyed `:embeddings/error`
 (`:model-not-found`, `:tokenizer-not-found`, `:model-closed`,
 `:unsupported-input`, `:unsupported-output`, `:dim-mismatch`).
-

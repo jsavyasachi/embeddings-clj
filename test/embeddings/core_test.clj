@@ -91,7 +91,7 @@
           (is (= {:embeddings/error :unknown-execution-provider
                   :provider :bogus}
                  (ex-data ex))))))
-    (testing "provider unavailable shape"
+    (testing "shape of an unavailable provider error"
       (try
         (let [model (embeddings/load-model "fixtures/token-model"
                                            {:execution-providers [:cuda]})]
@@ -167,14 +167,14 @@
 (deftest prefix-option
   (when-fixtures
     (embeddings/with-model [model "fixtures/token-model" {:normalize? false}]
-      (testing ":prefix prepends to every input, matching manual prepending"
+      (testing ":prefix adds a prefix to each input and matches a manual prefix"
         (let [manual (embeddings/embed model "query: hello")
               via-opt (embeddings/embed model "hello" {:prefix "query: "})]
           (is (= (vec manual) (vec via-opt))))
         (let [manual (embeddings/embed-batch model ["query: a" "query: b"])
               via-opt (embeddings/embed-batch model ["a" "b"] {:prefix "query: "})]
           (is (= (mapv vec manual) (mapv vec via-opt)))))
-      (testing "nil/absent opts unchanged"
+      (testing "nil and absent opts give the same result"
         (is (= (vec (embeddings/embed model "x"))
                (vec (embeddings/embed model "x" nil))))))))
 

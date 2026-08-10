@@ -87,7 +87,7 @@
                                 (reset! request value)
                                 {:status 200
                                  :body "{\"data\":[{\"index\":1,\"embedding\":[3,4]},{\"index\":0,\"embedding\":[1,2]}]}"})})]
-    (testing "response indexes restore input order"
+    (testing "response indexes restore the input order"
       (is (= [[1.0 2.0] [3.0 4.0]]
              (vectors (embeddings/embed-batch provider ["one" "two"])))))
     (is (= "https://api.voyageai.com/v1/embeddings" (:url @request)))

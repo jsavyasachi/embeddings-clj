@@ -1,5 +1,5 @@
 (ns embeddings.providers
-  "Hosted embedding providers implementing `embeddings.core/EmbeddingProvider`."
+  "Hosted embedding providers that implement `embeddings.core/EmbeddingProvider`."
   (:require [clojure.data.json :as json]
             [embeddings.core :as embeddings])
   (:import (java.net URI)

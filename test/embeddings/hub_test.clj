@@ -25,7 +25,7 @@
     (is (= (.getPath (io/file dir "sentence-transformers" "all-MiniLM-L6-v2")) path))
     (is (.exists (io/file path "model.onnx")))
     (is (.exists (io/file path "tokenizer.json")))
-    (testing "urls hit the HF resolve endpoints"
+    (testing "urls use the HF resolve endpoints"
       (is (some #(= "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx" %) @calls))
       (is (some #(= "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json" %) @calls)))))
 

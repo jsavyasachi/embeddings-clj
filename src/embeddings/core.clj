@@ -20,7 +20,7 @@
    :max-length 512})
 
 (defprotocol EmbeddingProvider
-  "A source of fixed-width text embeddings."
+  "A source of text embeddings with a fixed width."
   (embed [provider text] [provider text opts])
   (embed-batch [provider texts] [provider texts opts])
   (dimension [provider]))
@@ -231,13 +231,13 @@
         (close-on-failure! ex [@tokenizer session])))))
 
 (defn load-model
-  "Load a local model directory containing `model.onnx` and `tokenizer.json`.
+  "Load a local model directory that contains `model.onnx` and `tokenizer.json`.
 
   Options include `:pooling` (`:mean`, `:mean-sqrt-len`, `:cls`, `:max`),
   `:normalize?`, `:max-length`, and `:execution-providers`, a vector of
   provider keywords or maps such as `[:coreml]`, `[:cuda]`, or
-  `[{:provider :cuda :device-id 0}]`. CPU remains the implicit fallback when
-  execution providers are absent or empty."
+  `[{:provider :cuda :device-id 0}]`. CPU is the implicit fallback if execution
+  providers are absent or empty."
   ([model-dir]
    (load-model model-dir nil))
   ([model-dir opts]

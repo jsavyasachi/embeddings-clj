@@ -65,7 +65,7 @@
             batch (embeddings/embed-batch model texts)]
         (is (= 3 (count batch)))
         (doseq [^floats embedding batch]
-          (testing "batch embedding shape and normalization"
+          (testing "shape and normalization of batch embeddings"
             (is (= 384 (alength embedding)))
             (is (approx-scalar? 1.0 (math/norm embedding) 1.0E-3))))
         (doseq [[^floats single ^floats batched] (map vector singles batch)]

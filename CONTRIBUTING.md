@@ -5,13 +5,13 @@ focused feature contributions are all welcome.
 
 ## Before you start
 
-- For anything beyond a trivial fix, **open an issue first** so we can agree on
-  the approach before you invest time.
+- For anything beyond a trivial fix, **open an issue first**. This lets us agree
+  on the approach before you invest time.
 - Check existing issues and pull requests to avoid duplicate work.
 
 ## Project layout
 
-A single `deps.edn` library. Source under `src/embeddings/`:
+This is a single `deps.edn` library. Source files are under `src/embeddings/`:
 
 | Namespace | Purpose |
 |---|---|
@@ -24,7 +24,7 @@ Expected failures throw `ex-info` with an `:embeddings/error` key.
 
 ## Building and testing
 
-Requires JDK 17+.
+This project needs JDK 17 or later.
 
 ```bash
 clojure -M:test            # full suite (Kaocha)
@@ -33,8 +33,8 @@ clojure -M:1.12:test       # Clojure 1.12 matrix cell
 clojure -T:build jar       # build a jar
 ```
 
-Unit tests run against tiny deterministic ONNX fixtures (nothing binary is
-committed):
+Unit tests use small deterministic ONNX fixtures. The repository does not
+contain binary files:
 
 ```bash
 python3 dev/gen_fixture.py   # requires `pip install onnx`; tests skip cleanly without it
@@ -42,10 +42,10 @@ python3 dev/gen_fixture.py   # requires `pip install onnx`; tests skip cleanly w
 clojure -M:test --profile :integration --focus-meta :integration   # real-model suite
 ```
 
-The bar for a mergeable change:
+Requirements for a mergeable change:
 
-- **Tests first.** Add or update tests for the behavior you change; for a bug
-  fix, include a regression test that fails before your fix and passes after.
+- **Tests first.** Add or update tests for the behavior you change. For a bug
+  fix, include a regression test that fails before your fix and passes after it.
 - **Green build.** `clojure -M:test` passes and `src` compiles with **zero**
   reflection warnings (`*warn-on-reflection*` is on).
 - **No scope creep.** Keep each pull request to one logical change.
@@ -56,9 +56,9 @@ The bar for a mergeable change:
   (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:` …).
 - Keep the subject in the imperative mood and under ~72 characters.
 - Update `CHANGES.md` when your change is user-visible.
-- Rebase on the latest `main` before opening the pull request.
+- Rebase on the latest `main` before you open the pull request.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the
-Eclipse Public License 2.0, the same license as this project (see `LICENSE`).
+If you contribute, you agree to license your contributions under the Eclipse
+Public License 2.0, the same license as this project. See `LICENSE`.
