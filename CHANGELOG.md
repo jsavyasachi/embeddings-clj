@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1] - 2026-08-17
+
+### Fixed
+
+- The model cache path now includes the `revision`, so pinning a revision no
+  longer silently reuses another revision's cached files. The default `main`
+  revision keeps its existing location.
+
 ## [0.5.0] - 2026-08-01
 ### Changed
 - Move JSON handling to `org.clojure/data.json`.
