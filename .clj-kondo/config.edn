@@ -1,0 +1,5 @@
+{:linters
+ {:unresolved-symbol
+  {:level :off} ; `with-model` binding symbols are not recognized by clj-kondo.
+  :unused-referred-var
+  {:level :off}}} ; `testing` is a pre-existing unused test import.
