@@ -53,8 +53,12 @@
     :else (throw (ex-info (str "Invalid model variant: " (pr-str variant))
                           {:embeddings/error :invalid-variant :variant variant}))))
 
-(defn- model-root [cache-dir model-id variant]
-  (let [root (io/file (or cache-dir (default-cache-dir)) model-id)]
+(defn- model-root [cache-dir model-id revision variant]
+  (let [model-root (io/file (or cache-dir (default-cache-dir)) model-id)
+        ;; Keep the historical default branch location, while isolating pins.
+        root (if (= revision "main")
+               model-root
+               (io/file model-root revision))]
     (cond
       (nil? variant) root
       (= :quantized variant) (io/file root "quantized")
@@ -98,7 +102,7 @@
   (validate-model-id! model-id)
   (let [revision (or revision "main")
         paths (model-paths variant)
-        ^java.io.File root (model-root cache-dir model-id variant)
+        ^java.io.File root (model-root cache-dir model-id revision variant)
         model-file (io/file root "model.onnx")
         tokenizer-file (io/file root "tokenizer.json")]
     (when-not (and (.exists model-file) (pos? (.length model-file)))

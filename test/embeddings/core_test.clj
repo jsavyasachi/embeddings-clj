@@ -2,6 +2,7 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
             [embeddings.core :as embeddings]
+            [embeddings.hub :as hub]
             [embeddings.math :as math])
   (:import (java.nio.file Files StandardCopyOption)))
 
@@ -10,6 +11,7 @@
 (def ^:private epsilon 1.0E-5)
 (def fixtures-present?
   (.exists (java.io.File. "fixtures/token-model/model.onnx")))
+(def ^:private model-root #'hub/model-root)
 
 (defn- farray
   [& xs]
@@ -29,7 +31,17 @@
   [& body]
   `(if fixtures-present?
      (do ~@body)
-     (is true "fixtures absent; skipping ONNX corpus test")))
+     (clojure.test/do-report
+      {:type :skip
+       :message "fixtures absent; skipping ONNX corpus test"})))
+
+(deftest model-root-isolated-by-revision-test
+  (let [cache-dir (System/getProperty "java.io.tmpdir")
+        ^java.io.File main-root (model-root cache-dir "org/model" "main" nil)
+        ^java.io.File pinned-root (model-root cache-dir "org/model" "abc123" nil)
+        main-path (.getPath main-root)
+        pinned-path (.getPath pinned-root)]
+    (is (not= main-path pinned-path))))
 
 (defn- configured-model-dir []
   (let [dir (.toFile (Files/createTempDirectory
