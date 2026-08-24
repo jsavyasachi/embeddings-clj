@@ -5,7 +5,7 @@
             [embeddings.math :as math]
             [embeddings.pooling :as pooling]
             [tokenizers.core :as tokenizers])
-  (:import (ai.onnxruntime NodeInfo OnnxTensor OnnxValue OrtEnvironment OrtSession
+  (:import (ai.onnxruntime NodeInfo OnnxTensor OnnxValue OrtEnvironment OrtProvider OrtSession
                            OrtException TensorInfo)
            (ai.onnxruntime OrtSession$Result)
            (ai.onnxruntime OrtLoggingLevel
@@ -26,6 +26,57 @@
   (embed [provider text] [provider text opts])
   (embed-batch [provider texts] [provider texts opts])
   (dimension [provider]))
+
+(def ^:private configured-execution-providers
+  [:cpu :cuda :coreml :rocm :tensorrt :directml :xnnpack :webgpu])
+
+(def ^:private provider-names
+  {"CPUExecutionProvider" :cpu
+   "CUDAExecutionProvider" :cuda
+   "CoreMLExecutionProvider" :coreml
+   "ROCMExecutionProvider" :rocm
+   "TensorrtExecutionProvider" :tensorrt
+   "DmlExecutionProvider" :directml
+   "XnnpackExecutionProvider" :xnnpack
+   "WebGpuExecutionProvider" :webgpu})
+
+(def ^:private unresolved-execution-providers
+  [{:provider :vitis-ai
+    :reason "onnxruntime 1.28.0 exposes OrtProvider/VitisAI, but SessionOptions has no Vitis AI add method and the default artifact has no provider configuration path"}
+   {:provider :rk-npu
+    :reason "onnxruntime 1.28.0 exposes OrtProvider/RK_NPU, but SessionOptions has no RKNPU add method and the default artifact has no provider configuration path"}
+   {:provider :migraphx
+    :reason "onnxruntime 1.28.0 exposes OrtProvider/MI_GRAPH_X, but SessionOptions has no MIGraphX add method and the default artifact has no provider configuration path"}
+   {:provider :acl
+    :reason "onnxruntime 1.28.0 exposes OrtProvider/ACL, but this library does not configure SessionOptions/addACL"}
+   {:provider :azure
+    :reason "onnxruntime 1.28.0 exposes OrtProvider/AZURE, but SessionOptions has no Azure add method"}
+   {:provider :qnn
+    :reason "onnxruntime 1.28.0 exposes OrtProvider/QNN, but this library does not configure SessionOptions/addQnn"}])
+
+(defn execution-provider-discovery
+  "Return runtime-available, configured, and unresolved ONNX providers.
+
+  `:available` is obtained from ONNX Runtime's native runtime rather than
+  inferred from the Java enum, so it reflects the artifact and platform in
+  use."
+  []
+  (let [available (->> (OrtEnvironment/getAvailableProviders)
+                       (map (fn [^OrtProvider provider]
+                              (get provider-names (.getName provider))))
+                       (filter some?)
+                       sort
+                       vec)
+        unavailable (->> (remove (set available) configured-execution-providers)
+                         (map (fn [provider]
+                                {:provider provider
+                                 :reason (str "OrtEnvironment/getAvailableProviders did not report "
+                                              (name provider)
+                                              " for the pinned ONNX Runtime artifact and current platform")}))
+                         vec)]
+    {:available available
+     :supported configured-execution-providers
+     :unresolved-blockers (into unavailable unresolved-execution-providers)}))
 
 (declare embed-batch* model-dimension)
 
@@ -189,6 +240,7 @@
         :tensorrt (.addTensorrt session-options (int (provider-device-id entry)))
         :directml (.addDirectML session-options (int (provider-device-id entry)))
         :xnnpack (.addXnnpack session-options (Collections/emptyMap))
+        :webgpu (.addWebGPU session-options (Collections/emptyMap))
         (throw (ex-info "unknown execution provider"
                         {:embeddings/error :unknown-execution-provider
                          :provider provider})))
