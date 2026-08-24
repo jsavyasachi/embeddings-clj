@@ -72,7 +72,8 @@
       (string? variant) (io/file root (variant-slug variant))
       :else root)))
 
-(defn- ^HttpClient default-http-client []
+(defn- default-http-client
+  ^HttpClient []
   (-> (HttpClient/newBuilder)
       ;; HF resolve URLs redirect to a content-serving URL. HttpClient's
       ;; default is NEVER, so opt into the normal safe redirect policy.
@@ -165,7 +166,7 @@
                                                         (into-array StandardOpenOption
                                                                     [StandardOpenOption/CREATE
                                                                      StandardOpenOption/WRITE]))
-                  lock (.lock channel)]
+                  _lock (.lock channel)]
         (f)))))
 
 (defn- secure-download! [request! opts ^String url ^java.io.File dest expected]

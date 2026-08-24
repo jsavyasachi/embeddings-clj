@@ -135,7 +135,7 @@
   (let [^java.io.File dir (tmp-dir)
         requests (atom [])
         files {"onnx/model.onnx" "model" "tokenizer.json" "tokenizer"}
-        transport (fn [{:keys [url headers] :as request}]
+        transport (fn [{:keys [url] :as request}]
                     (swap! requests conj request)
                     (if (re-find #"/api/models/.*/tree/" url)
                       {:status 200 :headers {} :body (manifest files)}
@@ -163,18 +163,18 @@
                       (do (deliver entered true)
                           @release
                           {:status 200 :headers {} :body (if (re-find #"tokenizer" url)
-                                                            "tokenizer" "model")})))]
-    (let [f1 (future (hub/fetch-model "org/model" {:cache-dir (.getPath dir)
-                                                    :transport transport}))
-          _ @entered
-          f2 (future (hub/fetch-model "org/model" {:cache-dir (.getPath dir)
-                                                    :transport transport}))]
-      (Thread/sleep 50)
-      (is (not (realized? f2)))
-      (deliver release true)
-      @f1
-      @f2
-      (is (= 2 (count (filter #(not (re-find #"/api/models/" (:url %))) @requests)))))))
+                                                            "tokenizer" "model")})))
+        f1 (future (hub/fetch-model "org/model" {:cache-dir (.getPath dir)
+                                                  :transport transport}))
+        _ @entered
+        f2 (future (hub/fetch-model "org/model" {:cache-dir (.getPath dir)
+                                                  :transport transport}))]
+    (Thread/sleep 50)
+    (is (not (realized? f2)))
+    (deliver release true)
+    @f1
+    @f2
+    (is (= 2 (count (filter #(not (re-find #"/api/models/" (:url %))) @requests))))))
 
 (deftest fetches-into-cache-layout
   (let [^java.io.File dir (tmp-dir)

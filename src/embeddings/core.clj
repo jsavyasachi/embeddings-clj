@@ -608,14 +608,14 @@
         (let [^"[[D" token-vecs (aget output i)
               ^"[[F" float-token-vecs
               (into-array (Class/forName "[F")
-                          (map double-row->float token-vecs))]
-          (let [pooled (pooling/pool (:pooling opts)
-                                     float-token-vecs
-                                     (aget masks i))]
-            (recur (inc i)
-                   (conj out (normalize-if-needed pooled
-                                                  (:normalize? opts)
-                                                  (:output-dimensions opts))))))))))
+                          (map double-row->float token-vecs))
+              pooled (pooling/pool (:pooling opts)
+                                   float-token-vecs
+                                   (aget masks i))]
+          (recur (inc i)
+                 (conj out (normalize-if-needed pooled
+                                                (:normalize? opts)
+                                                (:output-dimensions opts)))))))))
 
 (defn- output-embeddings
   [value masks opts]
