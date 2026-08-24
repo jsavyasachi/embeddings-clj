@@ -147,6 +147,13 @@
       (throw (model-error "model output is not a tensor"
                           {:embeddings/error :unsupported-output})))))
 
+(defn- input-types
+  [^Map input-info]
+  (into {}
+        (map (fn [[name node]]
+               [name (.type ^TensorInfo (tensor-info node))]))
+        input-info))
+
 (defn- selected-output-name
   [output-names {:keys [output-name]}]
   (if output-name
@@ -266,7 +273,9 @@
                      (.createSession ^OrtEnvironment env (.getPath model-file)))]
        (construct-local-model session
                               #(tokenizers/from-file (.getPath tokenizer-file))
-                              resolved-opts
+                              (assoc resolved-opts
+                                     :input-types
+                                     (input-types (.getInputInfo ^OrtSession session)))
                               #(.getInputNames ^OrtSession session)
                               #(.getOutputNames ^OrtSession session))))))
 
@@ -351,6 +360,20 @@
                       {:embeddings/error :unsupported-input
                        :input name})))
 
+(defn- typed-padded-matrix
+  [encoded key seq-length pad-value type]
+  (let [values (padded-matrix encoded key seq-length pad-value)]
+    (if (= type ai.onnxruntime.OnnxJavaType/INT32)
+      (let [^"[[J" values values
+            ^"[[I" out (make-array Integer/TYPE (alength values) seq-length)]
+        (dotimes [i (alength values)]
+          (let [^longs source (aget values i)
+                ^ints target (aget out i)]
+            (dotimes [j seq-length]
+              (aset-int target j (int (aget source j))))))
+        out)
+      values)))
+
 (def ^:private default-input-schema
   {"input_ids" {:source :ids :pad-value 0}
    "attention_mask" {:source :attention-mask :pad-value 0}
@@ -368,6 +391,8 @@
   ([^OrtEnvironment env input-names encoded]
    (input-tensors env input-names encoded nil))
   ([^OrtEnvironment env input-names encoded input-schema]
+   (input-tensors env input-names encoded input-schema nil))
+  ([^OrtEnvironment env input-names encoded input-schema input-types]
    (let [schema (merge default-input-schema input-schema)
          seq-length (batch-seq-length encoded)
          masks (padded-matrix encoded :attention-mask seq-length 0)
@@ -375,7 +400,9 @@
          tensors (transient [])]
      (doseq [name input-names]
        (let [{:keys [source pad-value]} (input-spec schema name)
-             values (padded-matrix encoded source seq-length (long (or pad-value 0)))
+             type (get input-types name ai.onnxruntime.OnnxJavaType/INT64)
+             values (typed-padded-matrix encoded source seq-length
+                                          (long (or pad-value 0)) type)
              tensor (OnnxTensor/createTensor env values)]
          (.put inputs name tensor)
          (conj! tensors tensor)))
@@ -439,6 +466,40 @@
                                                 (:normalize? opts)
                                                 (:output-dimensions opts)))))))))
 
+(defn- double-row->float
+  ^floats
+  [^doubles row]
+  (let [out (float-array (alength row))]
+    (dotimes [i (alength row)]
+      (aset-float out i (float (aget row i))))
+    out))
+
+(defn- rank-2-double-embeddings
+  [^"[[D" output opts]
+  (mapv #(normalize-if-needed (double-row->float ^doubles %)
+                             (:normalize? opts)
+                             (:output-dimensions opts))
+        output))
+
+(defn- rank-3-double-embeddings
+  [^"[[[D" output ^"[[J" masks opts]
+  (let [batch-size (alength output)]
+    (loop [i 0
+           out []]
+      (if (= i batch-size)
+        out
+        (let [^"[[D" token-vecs (aget output i)
+              ^"[[F" float-token-vecs
+              (into-array (Class/forName "[F")
+                          (map double-row->float token-vecs))]
+          (let [pooled (pooling/pool (:pooling opts)
+                                     float-token-vecs
+                                     (aget masks i))]
+            (recur (inc i)
+                   (conj out (normalize-if-needed pooled
+                                                  (:normalize? opts)
+                                                  (:output-dimensions opts))))))))))
+
 (defn- output-embeddings
   [value masks opts]
   (cond
@@ -447,6 +508,12 @@
 
     (instance? (Class/forName "[[F") value)
     (rank-2-embeddings value opts)
+
+    (instance? (Class/forName "[[[D") value)
+    (rank-3-double-embeddings value masks opts)
+
+    (instance? (Class/forName "[[D") value)
+    (rank-2-double-embeddings value opts)
 
     :else
     (throw (model-error "unsupported model output"
@@ -465,7 +532,8 @@
           {:keys [^Map inputs tensors masks]} (input-tensors env
                                                               (:input-names model)
                                                               encoded
-                                                              (:input-schema opts))
+                                                              (:input-schema opts)
+                                                              (:input-types opts))
           ^OrtSession session (:session model)
           result (atom nil)]
       (try

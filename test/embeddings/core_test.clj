@@ -4,7 +4,8 @@
             [embeddings.core :as embeddings]
             [embeddings.hub :as hub]
             [embeddings.math :as math])
-  (:import (java.nio.file Files StandardCopyOption)))
+  (:import (java.nio ShortBuffer)
+           (java.nio.file Files StandardCopyOption)))
 
 (set! *warn-on-reflection* true)
 
@@ -264,9 +265,64 @@
                (mapv vec (.getValue ^ai.onnxruntime.OnnxTensor
                                     (.get ^java.util.Map (:inputs result)
                                           "custom_ids")))))
-        (finally
+      (finally
           (doseq [tensor (:tensors result)]
             (.close ^java.lang.AutoCloseable tensor)))))))
+
+(deftest input-tensor-type-follows-metadata-test
+  (let [input-tensors #'embeddings/input-tensors
+        encoded [{:ids [10 11]
+                  :attention-mask [1 1]}]
+        result (input-tensors
+                (ai.onnxruntime.OrtEnvironment/getEnvironment)
+                #{"input_ids" "attention_mask"}
+                encoded
+                nil
+                {"input_ids" ai.onnxruntime.OnnxJavaType/INT32
+                 "attention_mask" ai.onnxruntime.OnnxJavaType/INT64})]
+    (try
+      (is (= "[[I" (.getName (class (.getValue ^ai.onnxruntime.OnnxTensor
+                                                  (.get ^java.util.Map (:inputs result) "input_ids"))))))
+      (is (= "[[J" (.getName (class (.getValue ^ai.onnxruntime.OnnxTensor
+                                                  (.get ^java.util.Map (:inputs result) "attention_mask"))))))
+      (finally
+        (doseq [tensor (:tensors result)]
+          (.close ^java.lang.AutoCloseable tensor))))))
+
+(deftest alternate-output-dtypes-test
+  (let [output-embeddings #'embeddings/output-embeddings
+        masks (make-array Long/TYPE 1 2)
+        rank-2-double (make-array Double/TYPE 1 2)
+        rank-3-double (doto (make-array Double/TYPE 1 1 2)
+                        (aset-double 0 0 0 2.0)
+                        (aset-double 0 0 1 3.0))]
+    (aset-double rank-2-double 0 0 1.0)
+    (aset-double rank-2-double 0 1 2.0)
+    (aset-long masks 0 0 1)
+    (aset-long masks 0 1 1)
+    (is (approx= (farray 1.0 2.0)
+                 (first (output-embeddings rank-2-double masks
+                                            {:normalize? false}))))
+    (is (approx= (farray 2.0 3.0)
+                 (first (output-embeddings rank-3-double masks
+                                            {:pooling :cls :normalize? false}))))))
+
+(deftest float16-output-uses-runtime-conversion-test
+  (let [tensor (ai.onnxruntime.OnnxTensor/createTensor
+                (ai.onnxruntime.OrtEnvironment/getEnvironment)
+                (ShortBuffer/wrap (short-array [(short 0x3c00) (short 0x4000)]))
+                (long-array [1 2])
+                ai.onnxruntime.OnnxJavaType/FLOAT16)]
+    (try
+      (let [value (.getValue tensor)]
+        (is (= "[[F" (.getName (class value))))
+        (is (approx= (farray 1.0 2.0)
+                     (first ((deref #'embeddings/output-embeddings)
+                             value
+                             (make-array Long/TYPE 1 2)
+                             {:normalize? false})))))
+      (finally
+        (.close ^java.lang.AutoCloseable tensor)))))
 
 (deftest matryoshka-output-dimensions-test
   (let [postprocess #'embeddings/normalize-if-needed
