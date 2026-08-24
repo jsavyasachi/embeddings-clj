@@ -60,8 +60,16 @@ Local and hosted models implement `embeddings.core/EmbeddingProvider`, with
 Hosted provider options include `:api-key`, `:model`, `:dimensions`,
 `:batch-size` (default `128`), `:url` for an endpoint override, and
 `:transport` for an injectable request function. Cohere and Voyage also accept
-`:input-type`. The transport receives `{:url :method :headers :body}` and must
-return `{:status :body}`.
+`:input-type`. Use `:headers` to add or override HTTP headers for hosted calls.
+Requests use a 10-second connection timeout and 60-second request timeout by
+default; configure these with `:connect-timeout-ms` and
+`:request-timeout-ms`. Transient HTTP failures are retried up to three times
+with exponential backoff and jitter. Configure this with `:max-retries`,
+`:retry-base-delay-ms`, `:retry-max-delay-ms`, and `:retry-jitter` (or inject
+`:sleep-fn` for tests). A numeric `Retry-After` response header on a 429 is
+honored in preference to the calculated delay. The transport receives
+`{:url :method :headers :body}` and must return `{:status :body}`, optionally
+with `:headers` for retry handling.
 
 ## Local model options
 
