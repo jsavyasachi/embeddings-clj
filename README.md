@@ -60,8 +60,10 @@ Local and hosted models implement `embeddings.core/EmbeddingProvider`, with
 Hosted provider options include `:api-key`, `:model`, `:dimensions`,
 `:batch-size` (default `128`), `:url` for an endpoint override, and
 `:transport` for an injectable request function. Cohere and Voyage also accept
-`:input-type`. The transport receives `{:url :method :headers :body}` and must
-return `{:status :body}`.
+`:input-type`. OpenAI accepts `:encoding-format` (`"float"` or `"base64"`),
+Cohere accepts `:truncate` and `:max-tokens`, and Voyage accepts
+`:output-dtype`. The transport receives `{:url :method :headers :body}` and
+must return `{:status :body}`.
 
 ## Local model options
 
