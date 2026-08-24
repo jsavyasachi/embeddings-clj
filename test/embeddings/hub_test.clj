@@ -1,8 +1,11 @@
 (ns embeddings.hub-test
   (:require [clojure.java.io :as io]
+            [clojure.data.json :as json]
             [clojure.test :refer [deftest is testing]]
             [embeddings.hub :as hub])
-  (:import (java.nio.file Files)))
+  (:import (java.nio.file Files)
+           (java.math BigInteger)
+           (java.security MessageDigest)))
 
 (set! *warn-on-reflection* true)
 
@@ -10,6 +13,168 @@
 
 (defn- tmp-dir []
   (.toFile (Files/createTempDirectory "hub-test" (make-array java.nio.file.attribute.FileAttribute 0))))
+
+(defn- sha256 [^String value]
+  (format "%064x" (BigInteger. 1 (.digest (doto (MessageDigest/getInstance "SHA-256")
+                                           (.update (.getBytes ^String value "UTF-8")))))))
+
+(defn- manifest [files]
+  (json/write-str (mapv (fn [[path body]]
+                          {"path" path
+                           "type" "file"
+                           "size" (count body)
+                           "lfs" {"sha256" (sha256 body)}})
+                        files)))
+
+(defn- ordinary-manifest [files]
+  (json/write-str (mapv (fn [[path body]]
+                          {"path" path
+                           "type" "file"
+                           "size" (count body)
+                           "oid" "ordinary-file-git-blob-id"})
+                        files)))
+
+(defn- secure-transport [requests files]
+  (fn [{:keys [url headers method]}]
+    (swap! requests conj {:url url :headers headers :method method})
+    (if (re-find #"/api/models/.*/tree/" url)
+      {:status 200 :headers {} :body (manifest files)}
+      (let [path (last (re-find #"/resolve/[^/]+/(.*)$" url))
+            body (get files path)]
+        {:status (if body 200 404)
+         :headers {"content-length" (str (count body))}
+         :body body}))))
+
+(deftest secure-download-sends-explicit-auth-token
+  (let [^java.io.File dir (tmp-dir)
+        requests (atom [])
+        transport (secure-transport requests
+                                    {"onnx/model.onnx" "model"
+                                     "tokenizer.json" "tokenizer"})]
+    (hub/fetch-model "org/model" {:cache-dir (.getPath dir)
+                                   :token "explicit-token"
+                                   :transport transport})
+    (is (every? #(= "Bearer explicit-token" (get-in % [:headers "Authorization"]))
+                @requests))))
+
+(deftest default-transport-follows-normal-redirects
+  (is (= java.net.http.HttpClient$Redirect/NORMAL
+         (.followRedirects ^java.net.http.HttpClient
+                           ((deref #'hub/default-http-client))))))
+
+(deftest secure-download-skips-checksum-for-ordinary-files
+  (let [^java.io.File dir (tmp-dir)
+        transport (fn [{:keys [url]}]
+                    (if (re-find #"/api/models/.*/tree/" url)
+                      {:status 200 :headers {} :body (ordinary-manifest {"onnx/model.onnx" "model"
+                                                                           "tokenizer.json" "tokenizer"})}
+                      {:status 200 :headers {} :body (if (re-find #"tokenizer" url)
+                                                        "tokenizer"
+                                                        "model")}))]
+    (hub/fetch-model "org/model" {:cache-dir (.getPath dir)
+                                   :transport transport})
+    (is (= "model" (slurp (io/file dir "org/model/model.onnx"))))))
+
+(deftest manifest-http-errors-throw-clear-ex-info
+  (let [^java.io.File dir (tmp-dir)]
+    (is (= {:embeddings/error :manifest-failed
+            :status 503}
+           (try (hub/fetch-model "org/model" {:cache-dir (.getPath dir)
+                                                :transport (fn [_] {:status 503
+                                                                    :headers {}
+                                                                    :body "unavailable"})})
+                (catch clojure.lang.ExceptionInfo e
+                  (select-keys (ex-data e) [:embeddings/error :status])))))))
+
+(deftest manifest-pagination-follows-next-link
+  (let [^java.io.File dir (tmp-dir)
+        pages (atom 0)
+        transport (fn [{:keys [url]}]
+                    (if (re-find #"/api/models/.*/tree/" url)
+                      (if (= 1 (swap! pages inc))
+                        {:status 200
+                         :headers {"link" ["<https://huggingface.co/api/models/org/model/tree/main?recursive=true&cursor=next>; rel=\"next\""]}
+                         :body (ordinary-manifest {"onnx/model.onnx" "model"})}
+                        {:status 200 :headers {} :body (ordinary-manifest {"tokenizer.json" "tokenizer"})})
+                      {:status 200 :headers {} :body (if (re-find #"tokenizer" url)
+                                                        "tokenizer"
+                                                        "model")}))]
+    (hub/fetch-model "org/model" {:cache-dir (.getPath dir)
+                                   :transport transport})
+    (is (= 2 @pages))
+    (is (.exists (io/file dir "org/model/model.onnx")))
+    (is (.exists (io/file dir "org/model/tokenizer.json")))))
+
+(deftest secure-download-uses-hf-token-environment
+  (let [^java.io.File dir (tmp-dir)
+        requests (atom [])
+        transport (secure-transport requests
+                                    {"onnx/model.onnx" "model"
+                                     "tokenizer.json" "tokenizer"})]
+    (with-redefs [hub/environment-token (constantly "environment-token")]
+      (hub/fetch-model "org/model" {:cache-dir (.getPath dir)
+                                     :transport transport}))
+    (is (every? #(= "Bearer environment-token" (get-in % [:headers "Authorization"]))
+                @requests))))
+
+(deftest secure-download-verifies-published-checksums
+  (let [^java.io.File dir (tmp-dir)
+        requests (atom [])
+        files {"onnx/model.onnx" "model" "tokenizer.json" "tokenizer"}
+        transport (secure-transport requests files)]
+    (hub/fetch-model "org/model" {:cache-dir (.getPath dir)
+                                   :transport transport})
+    (spit (io/file dir "org/model/model.onnx") "tampered")
+    (is (= :checksum-mismatch
+           (try (hub/fetch-model "org/model" {:cache-dir (.getPath dir)
+                                                :transport transport})
+                (catch clojure.lang.ExceptionInfo e
+                  (:embeddings/error (ex-data e))))))))
+
+(deftest secure-download-resumes-partial-file
+  (let [^java.io.File dir (tmp-dir)
+        requests (atom [])
+        files {"onnx/model.onnx" "model" "tokenizer.json" "tokenizer"}
+        transport (fn [{:keys [url headers] :as request}]
+                    (swap! requests conj request)
+                    (if (re-find #"/api/models/.*/tree/" url)
+                      {:status 200 :headers {} :body (manifest files)}
+                      {:status 206
+                       :headers {"content-range" "bytes 2-4/5"}
+                       :body (if (re-find #"tokenizer" url) "tokenizer" "del")}))
+        root (io/file dir "org/model")]
+    (.mkdirs root)
+    (spit (io/file root "model.onnx.part") "mo")
+    (hub/fetch-model "org/model" {:cache-dir (.getPath dir)
+                                   :transport transport})
+    (is (= "model" (slurp (io/file root "model.onnx"))))
+    (is (= "bytes=2-" (some #(get-in % [:headers "Range"]) @requests)))))
+
+(deftest secure-download-serializes-concurrent-writers
+  (let [^java.io.File dir (tmp-dir)
+        requests (atom [])
+        entered (promise)
+        release (promise)
+        transport (fn [{:keys [url] :as request}]
+                    (swap! requests conj request)
+                    (if (re-find #"/api/models/.*/tree/" url)
+                      {:status 200 :headers {} :body (manifest {"onnx/model.onnx" "model"
+                                                                 "tokenizer.json" "tokenizer"})}
+                      (do (deliver entered true)
+                          @release
+                          {:status 200 :headers {} :body (if (re-find #"tokenizer" url)
+                                                            "tokenizer" "model")})))]
+    (let [f1 (future (hub/fetch-model "org/model" {:cache-dir (.getPath dir)
+                                                    :transport transport}))
+          _ @entered
+          f2 (future (hub/fetch-model "org/model" {:cache-dir (.getPath dir)
+                                                    :transport transport}))]
+      (Thread/sleep 50)
+      (is (not (realized? f2)))
+      (deliver release true)
+      @f1
+      @f2
+      (is (= 2 (count (filter #(not (re-find #"/api/models/" (:url %))) @requests)))))))
 
 (deftest fetches-into-cache-layout
   (let [^java.io.File dir (tmp-dir)
