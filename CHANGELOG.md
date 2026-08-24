@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.6.0] - 2026-08-24
+
+### Added
+
+- Add batch dot-product and cosine similarity-search utilities with top-k
+  ranking and a brute-force in-memory vector index in the new
+  `embeddings.search` namespace.
+- Add provider-specific request options: OpenAI `encoding_format`, Cohere
+  `truncate` and token controls, and Voyage `output_dtype`.
+- Add strict response-shape validation for hosted providers, including
+  embedding-count and dimension consistency checks with typed errors for
+  malformed payloads.
+- Add ONNX session performance controls for threads, optimization, memory,
+  profiling, and logging.
+- Add ONNX input/output dtype compatibility for int32 inputs and float16 or
+  float64 outputs inferred from session metadata.
+- Add execution-provider discovery that advertises only providers shipped by
+  the pinned ONNX Runtime artifact: CPU, CoreML, and WebGPU.
+- Add resilient hosted-provider transport with timeouts, exponential retry
+  with jitter, and `Retry-After` handling.
+
+### Fixed
+
+- Parse both integer seconds and RFC 1123 HTTP-date values in `Retry-After`.
+- Retry transient transport-level exceptions, not only retryable HTTP status
+  codes.
+- Follow Hugging Face resolve redirects during downloads.
+- Run checksum verification only for files with a genuine LFS content hash,
+  rather than fabricating one from a non-LFS git blob ID.
+- Check response status and handle pagination when listing manifests.
+
 ## [0.5.1] - 2026-08-17
 
 ### Fixed

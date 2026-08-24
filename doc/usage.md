@@ -27,6 +27,13 @@ Options for `load-model` with default values:
 | `:normalize?` | `true` | L2-normalize output vectors (unit length, ready for cosine) |
 | `:max-length` | `512` | truncate inputs to this many tokens |
 | `:execution-providers` | none (CPU) | ONNX Runtime execution providers to try, e.g. `[:coreml]` or `[{:provider :cuda :device-id 0}]`; also `:rocm`, `:tensorrt`, `:directml`, `:xnnpack` |
+| `:intra-op-num-threads` | runtime default | ONNX Runtime intra-op thread count |
+| `:inter-op-num-threads` | runtime default | ONNX Runtime inter-op thread count |
+| `:graph-optimization-level` | runtime default | `:no-opt`, `:basic`, `:extended`, `:layout`, or `:all` |
+| `:memory-pattern-optimization?` | runtime default | enable or disable memory-pattern optimization |
+| `:cpu-arena-allocator?` | runtime default | enable or disable the CPU arena allocator |
+| `:profiling-output-path` | disabled | write ONNX Runtime profiling data to this path |
+| `:session-log-level` | runtime default | `:verbose`, `:info`, `:warning`, `:error`, or `:fatal` |
 
 Execution providers need an onnxruntime build that includes them. The default
 `com.microsoft.onnxruntime/onnxruntime` artifact is CPU-only, and CUDA needs

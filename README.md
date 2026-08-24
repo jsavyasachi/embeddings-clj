@@ -18,13 +18,13 @@ hosted OpenAI, Cohere, and Voyage models.
 deps.edn:
 
 ```clojure
-net.clojars.savya/embeddings-clj {:mvn/version "0.5.1"}
+net.clojars.savya/embeddings-clj {:mvn/version "0.6.0"}
 ```
 
 Leiningen:
 
 ```clojure
-[net.clojars.savya/embeddings-clj "0.5.1"]
+[net.clojars.savya/embeddings-clj "0.6.0"]
 ```
 
 The library parses JSON with the declared `org.clojure/data.json` dependency. It
@@ -60,13 +60,50 @@ Local and hosted models implement `embeddings.core/EmbeddingProvider`, with
 Hosted provider options include `:api-key`, `:model`, `:dimensions`,
 `:batch-size` (default `128`), `:url` for an endpoint override, and
 `:transport` for an injectable request function. Cohere and Voyage also accept
-`:input-type`. The transport receives `{:url :method :headers :body}` and must
-return `{:status :body}`.
+`:input-type`. OpenAI accepts `:encoding-format` (`"float"` or `"base64"`),
+Cohere accepts `:truncate` and `:max-tokens`, and Voyage accepts
+`:output-dtype`. Use `:headers` to add or override HTTP headers for hosted calls.
+Requests use a 10-second connection timeout and 60-second request timeout by
+default; configure these with `:connect-timeout-ms` and
+`:request-timeout-ms`. Transient HTTP failures are retried up to three times
+with exponential backoff and jitter. Configure this with `:max-retries`,
+`:retry-base-delay-ms`, `:retry-max-delay-ms`, and `:retry-jitter` (or inject
+`:sleep-fn` for tests). A numeric `Retry-After` response header on a 429 is
+honored in preference to the calculated delay. The transport receives
+`{:url :method :headers :body}` and must return `{:status :body}`, optionally
+with `:headers` for retry handling.
+
+## Similarity search
+
+The `embeddings.search` namespace ranks in-memory `float[]` embeddings without
+network or model access. It supports dot-product or cosine scoring, stable
+top-k ranking, predicate filtering, and reusable brute-force indexes:
+
+```clojure
+(require '[embeddings.search :as search])
+
+(search/search query candidates {:metric :cosine
+                                 :k 5
+                                 :predicate #(not (:deleted? %))
+                                 :vector-fn :embedding})
+
+(def index (search/build-index candidates :embedding))
+(search/query index query {:metric :cosine :k 5})
+```
+
+Candidates must contain `float[]` vectors (or be `float[]` vectors themselves).
+Ties retain candidate order; dimensions must match, and `k` must be a
+non-negative integer.
 
 ## Local model options
 
 `embeddings.core/load-model` accepts pooling, normalization,
 maximum-length, and execution-provider options, plus:
+
+- `embeddings.core/execution-provider-discovery` reports the providers exposed
+  by the current ONNX Runtime, the providers this library can configure, and
+  unresolved provider blockers. Configurable providers include CPU, CoreML,
+  and WebGPU.
 
 - `:output-name`: select a named ONNX graph output.
 - `:input-schema`: map custom ONNX input names to an encoded source keyword or

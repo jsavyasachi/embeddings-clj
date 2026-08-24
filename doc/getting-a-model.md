@@ -10,8 +10,16 @@ the cache does not hold it:
 (require '[embeddings.hub :as hub])
 
 (def model-dir (hub/fetch-model "sentence-transformers/all-MiniLM-L6-v2"))
-;; opts: {:cache-dir "..." :revision "main" :variant ...}
+;; opts: {:cache-dir "..." :revision "main" :variant ...
+;;       :token "hf_..." :transport ...}
 ```
+
+Downloads use the `:token` option when supplied, otherwise `:hf-token`, then
+the conventional `HF_TOKEN` environment variable. Hugging Face file metadata
+provides the SHA-256 hashes used to verify each download before atomic cache
+finalization. Interrupted downloads continue from the local `.part` file with
+an HTTP Range request, and a per-model file lock prevents concurrent writers.
+Checksum failures remove the partial file and refuse to install it.
 
 Quantized exports: `:variant :quantized` tries the common quantized paths in
 this order: `onnx/model_quantized.onnx`, `onnx/model_qint8_avx512_vnni.onnx`,

@@ -5,10 +5,12 @@
             [embeddings.math :as math]
             [embeddings.pooling :as pooling]
             [tokenizers.core :as tokenizers])
-  (:import (ai.onnxruntime NodeInfo OnnxTensor OnnxValue OrtEnvironment OrtSession
+  (:import (ai.onnxruntime NodeInfo OnnxTensor OnnxValue OrtEnvironment OrtProvider OrtSession
                            OrtException TensorInfo)
            (ai.onnxruntime OrtSession$Result)
-           (ai.onnxruntime OrtSession$SessionOptions)
+           (ai.onnxruntime OrtLoggingLevel
+                           OrtSession$SessionOptions
+                           OrtSession$SessionOptions$OptLevel)
            (java.io File)
            (java.util Collections HashMap Map)))
 
@@ -24,6 +26,57 @@
   (embed [provider text] [provider text opts])
   (embed-batch [provider texts] [provider texts opts])
   (dimension [provider]))
+
+(def ^:private configured-execution-providers
+  [:cpu :cuda :coreml :rocm :tensorrt :directml :xnnpack :webgpu])
+
+(def ^:private provider-names
+  {"CPUExecutionProvider" :cpu
+   "CUDAExecutionProvider" :cuda
+   "CoreMLExecutionProvider" :coreml
+   "ROCMExecutionProvider" :rocm
+   "TensorrtExecutionProvider" :tensorrt
+   "DmlExecutionProvider" :directml
+   "XnnpackExecutionProvider" :xnnpack
+   "WebGpuExecutionProvider" :webgpu})
+
+(def ^:private unresolved-execution-providers
+  [{:provider :vitis-ai
+    :reason "onnxruntime 1.28.0 exposes OrtProvider/VitisAI, but SessionOptions has no Vitis AI add method and the default artifact has no provider configuration path"}
+   {:provider :rk-npu
+    :reason "onnxruntime 1.28.0 exposes OrtProvider/RK_NPU, but SessionOptions has no RKNPU add method and the default artifact has no provider configuration path"}
+   {:provider :migraphx
+    :reason "onnxruntime 1.28.0 exposes OrtProvider/MI_GRAPH_X, but SessionOptions has no MIGraphX add method and the default artifact has no provider configuration path"}
+   {:provider :acl
+    :reason "onnxruntime 1.28.0 exposes OrtProvider/ACL, but this library does not configure SessionOptions/addACL"}
+   {:provider :azure
+    :reason "onnxruntime 1.28.0 exposes OrtProvider/AZURE, but SessionOptions has no Azure add method"}
+   {:provider :qnn
+    :reason "onnxruntime 1.28.0 exposes OrtProvider/QNN, but this library does not configure SessionOptions/addQnn"}])
+
+(defn execution-provider-discovery
+  "Return runtime-available, configured, and unresolved ONNX providers.
+
+  `:available` is obtained from ONNX Runtime's native runtime rather than
+  inferred from the Java enum, so it reflects the artifact and platform in
+  use."
+  []
+  (let [available (->> (OrtEnvironment/getAvailableProviders)
+                       (map (fn [^OrtProvider provider]
+                              (get provider-names (.getName provider))))
+                       (filter some?)
+                       sort
+                       vec)
+        unavailable (->> (remove (set available) configured-execution-providers)
+                         (map (fn [provider]
+                                {:provider provider
+                                 :reason (str "OrtEnvironment/getAvailableProviders did not report "
+                                              (name provider)
+                                              " for the pinned ONNX Runtime artifact and current platform")}))
+                         vec)]
+    {:available available
+     :supported configured-execution-providers
+     :unresolved-blockers (into unavailable unresolved-execution-providers)}))
 
 (declare embed-batch* model-dimension)
 
@@ -147,6 +200,13 @@
       (throw (model-error "model output is not a tensor"
                           {:embeddings/error :unsupported-output})))))
 
+(defn- input-types
+  [^Map input-info]
+  (into {}
+        (map (fn [[name node]]
+               [name (.type ^TensorInfo (tensor-info node))]))
+        input-info))
+
 (defn- selected-output-name
   [output-names {:keys [output-name]}]
   (if output-name
@@ -180,6 +240,7 @@
         :tensorrt (.addTensorrt session-options (int (provider-device-id entry)))
         :directml (.addDirectML session-options (int (provider-device-id entry)))
         :xnnpack (.addXnnpack session-options (Collections/emptyMap))
+        :webgpu (.addWebGPU session-options (Collections/emptyMap))
         (throw (ex-info "unknown execution provider"
                         {:embeddings/error :unknown-execution-provider
                          :provider provider})))
@@ -188,12 +249,70 @@
       (catch UnsatisfiedLinkError ex
         (provider-unavailable provider ex)))))
 
+(def ^:private session-option-keys
+  [:intra-op-num-threads
+   :inter-op-num-threads
+   :graph-optimization-level
+   :memory-pattern-optimization?
+   :cpu-arena-allocator?
+   :profiling-output-path
+   :session-log-level])
+
+(def ^:private optimization-levels
+  {:no-opt OrtSession$SessionOptions$OptLevel/NO_OPT
+   :basic OrtSession$SessionOptions$OptLevel/BASIC_OPT
+   :extended OrtSession$SessionOptions$OptLevel/EXTENDED_OPT
+   :layout OrtSession$SessionOptions$OptLevel/LAYOUT_OPT
+   :all OrtSession$SessionOptions$OptLevel/ALL_OPT})
+
+(def ^:private log-levels
+  {:verbose OrtLoggingLevel/ORT_LOGGING_LEVEL_VERBOSE
+   :info OrtLoggingLevel/ORT_LOGGING_LEVEL_INFO
+   :warning OrtLoggingLevel/ORT_LOGGING_LEVEL_WARNING
+   :error OrtLoggingLevel/ORT_LOGGING_LEVEL_ERROR
+   :fatal OrtLoggingLevel/ORT_LOGGING_LEVEL_FATAL})
+
+(defn- new-session-options
+  ^OrtSession$SessionOptions
+  []
+  (OrtSession$SessionOptions.))
+
+(defn- configure-session-options!
+  [^OrtSession$SessionOptions session-options opts]
+  (when-let [value (:intra-op-num-threads opts)]
+    (.setIntraOpNumThreads session-options (int value)))
+  (when-let [value (:inter-op-num-threads opts)]
+    (.setInterOpNumThreads session-options (int value)))
+  (when-let [value (:graph-optimization-level opts)]
+    (if-let [level (get optimization-levels value)]
+      (.setOptimizationLevel session-options level)
+      (throw (ex-info "unknown graph optimization level"
+                      {:embeddings/error :unknown-graph-optimization-level
+                       :graph-optimization-level value}))))
+  (when (contains? opts :memory-pattern-optimization?)
+    (.setMemoryPatternOptimization session-options
+                                   (boolean (:memory-pattern-optimization? opts))))
+  (when (contains? opts :cpu-arena-allocator?)
+    (.setCPUArenaAllocator session-options
+                           (boolean (:cpu-arena-allocator? opts))))
+  (when-let [path (:profiling-output-path opts)]
+    (.enableProfiling session-options ^String path))
+  (when-let [value (:session-log-level opts)]
+    (if-let [level (get log-levels value)]
+      (.setSessionLogLevel session-options level)
+      (throw (ex-info "unknown session log level"
+                      {:embeddings/error :unknown-session-log-level
+                       :session-log-level value}))))
+  session-options)
+
 (defn- ->session-options
   ^OrtSession$SessionOptions
-  [execution-providers]
-  (when (seq execution-providers)
-    (let [session-options (OrtSession$SessionOptions.)]
+  [opts execution-providers]
+  (when (or (seq execution-providers)
+            (some #(contains? opts %) session-option-keys))
+    (let [session-options (new-session-options)]
       (try
+        (configure-session-options! session-options opts)
         (doseq [entry execution-providers]
           (add-execution-provider! session-options entry))
         session-options
@@ -236,8 +355,13 @@
   Options include `:pooling` (`:mean`, `:mean-sqrt-len`, `:cls`, `:max`),
   `:normalize?`, `:max-length`, and `:execution-providers`, a vector of
   provider keywords or maps such as `[:coreml]`, `[:cuda]`, or
-  `[{:provider :cuda :device-id 0}]`. CPU is the implicit fallback if execution
-  providers are absent or empty."
+  `[{:provider :cuda :device-id 0}]`. Session performance options include
+  `:intra-op-num-threads`, `:inter-op-num-threads`,
+  `:graph-optimization-level` (`:no-opt`, `:basic`, `:extended`, `:layout`,
+  or `:all`), `:memory-pattern-optimization?`, `:cpu-arena-allocator?`,
+  `:profiling-output-path`, and `:session-log-level` (`:verbose`, `:info`,
+  `:warning`, `:error`, or `:fatal`). CPU is the implicit fallback if
+  execution providers are absent or empty."
   ([model-dir]
    (load-model model-dir nil))
   ([model-dir opts]
@@ -253,7 +377,7 @@
                             :path (.getPath tokenizer-file)})))
      (let [resolved-opts (merge default-opts (model-config-opts model-dir) opts)
            env (OrtEnvironment/getEnvironment)
-           session-options (->session-options (:execution-providers opts))
+           session-options (->session-options opts (:execution-providers opts))
            session (if session-options
                      (try
                        (.createSession ^OrtEnvironment env (.getPath model-file) session-options)
@@ -266,7 +390,9 @@
                      (.createSession ^OrtEnvironment env (.getPath model-file)))]
        (construct-local-model session
                               #(tokenizers/from-file (.getPath tokenizer-file))
-                              resolved-opts
+                              (assoc resolved-opts
+                                     :input-types
+                                     (input-types (.getInputInfo ^OrtSession session)))
                               #(.getInputNames ^OrtSession session)
                               #(.getOutputNames ^OrtSession session))))))
 
@@ -351,6 +477,20 @@
                       {:embeddings/error :unsupported-input
                        :input name})))
 
+(defn- typed-padded-matrix
+  [encoded key seq-length pad-value type]
+  (let [values (padded-matrix encoded key seq-length pad-value)]
+    (if (= type ai.onnxruntime.OnnxJavaType/INT32)
+      (let [^"[[J" values values
+            ^"[[I" out (make-array Integer/TYPE (alength values) seq-length)]
+        (dotimes [i (alength values)]
+          (let [^longs source (aget values i)
+                ^ints target (aget out i)]
+            (dotimes [j seq-length]
+              (aset-int target j (int (aget source j))))))
+        out)
+      values)))
+
 (def ^:private default-input-schema
   {"input_ids" {:source :ids :pad-value 0}
    "attention_mask" {:source :attention-mask :pad-value 0}
@@ -368,6 +508,8 @@
   ([^OrtEnvironment env input-names encoded]
    (input-tensors env input-names encoded nil))
   ([^OrtEnvironment env input-names encoded input-schema]
+   (input-tensors env input-names encoded input-schema nil))
+  ([^OrtEnvironment env input-names encoded input-schema input-types]
    (let [schema (merge default-input-schema input-schema)
          seq-length (batch-seq-length encoded)
          masks (padded-matrix encoded :attention-mask seq-length 0)
@@ -375,7 +517,9 @@
          tensors (transient [])]
      (doseq [name input-names]
        (let [{:keys [source pad-value]} (input-spec schema name)
-             values (padded-matrix encoded source seq-length (long (or pad-value 0)))
+             type (get input-types name ai.onnxruntime.OnnxJavaType/INT64)
+             values (typed-padded-matrix encoded source seq-length
+                                          (long (or pad-value 0)) type)
              tensor (OnnxTensor/createTensor env values)]
          (.put inputs name tensor)
          (conj! tensors tensor)))
@@ -439,6 +583,40 @@
                                                 (:normalize? opts)
                                                 (:output-dimensions opts)))))))))
 
+(defn- double-row->float
+  ^floats
+  [^doubles row]
+  (let [out (float-array (alength row))]
+    (dotimes [i (alength row)]
+      (aset-float out i (float (aget row i))))
+    out))
+
+(defn- rank-2-double-embeddings
+  [^"[[D" output opts]
+  (mapv #(normalize-if-needed (double-row->float ^doubles %)
+                             (:normalize? opts)
+                             (:output-dimensions opts))
+        output))
+
+(defn- rank-3-double-embeddings
+  [^"[[[D" output ^"[[J" masks opts]
+  (let [batch-size (alength output)]
+    (loop [i 0
+           out []]
+      (if (= i batch-size)
+        out
+        (let [^"[[D" token-vecs (aget output i)
+              ^"[[F" float-token-vecs
+              (into-array (Class/forName "[F")
+                          (map double-row->float token-vecs))
+              pooled (pooling/pool (:pooling opts)
+                                   float-token-vecs
+                                   (aget masks i))]
+          (recur (inc i)
+                 (conj out (normalize-if-needed pooled
+                                                (:normalize? opts)
+                                                (:output-dimensions opts)))))))))
+
 (defn- output-embeddings
   [value masks opts]
   (cond
@@ -447,6 +625,12 @@
 
     (instance? (Class/forName "[[F") value)
     (rank-2-embeddings value opts)
+
+    (instance? (Class/forName "[[[D") value)
+    (rank-3-double-embeddings value masks opts)
+
+    (instance? (Class/forName "[[D") value)
+    (rank-2-double-embeddings value opts)
 
     :else
     (throw (model-error "unsupported model output"
@@ -465,7 +649,8 @@
           {:keys [^Map inputs tensors masks]} (input-tensors env
                                                               (:input-names model)
                                                               encoded
-                                                              (:input-schema opts))
+                                                              (:input-schema opts)
+                                                              (:input-types opts))
           ^OrtSession session (:session model)
           result (atom nil)]
       (try

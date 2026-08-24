@@ -4,7 +4,8 @@
             [embeddings.core :as embeddings]
             [embeddings.hub :as hub]
             [embeddings.math :as math])
-  (:import (java.nio.file Files StandardCopyOption)))
+  (:import (java.nio ShortBuffer)
+           (java.nio.file Files StandardCopyOption)))
 
 (set! *warn-on-reflection* true)
 
@@ -121,6 +122,47 @@
           (is (= :cuda (:provider (ex-data ex))))
           (is (some? (ex-cause ex))))))))
 
+(deftest session-options-performance-controls-test
+  (let [calls (atom [])
+        session-options (proxy [ai.onnxruntime.OrtSession$SessionOptions] []
+                          (setIntraOpNumThreads [value]
+                            (swap! calls conj [:intra-op value]))
+                          (setInterOpNumThreads [value]
+                            (swap! calls conj [:inter-op value]))
+                          (setOptimizationLevel [value]
+                            (swap! calls conj [:optimization value]))
+                          (setMemoryPatternOptimization [value]
+                            (swap! calls conj [:memory-pattern value]))
+                          (setCPUArenaAllocator [value]
+                            (swap! calls conj [:cpu-arena value]))
+                          (enableProfiling [value]
+                            (swap! calls conj [:profiling value]))
+                          (setSessionLogLevel [value]
+                            (swap! calls conj [:log-level value])))]
+    (with-redefs [embeddings/new-session-options (constantly session-options)]
+      (let [result (#'embeddings/->session-options
+                    {:intra-op-num-threads 3
+                     :inter-op-num-threads 5
+                     :graph-optimization-level :all
+                     :memory-pattern-optimization? false
+                     :cpu-arena-allocator? false
+                     :profiling-output-path "/tmp/embeddings-profile.json"
+                     :session-log-level :warning}
+                    nil)]
+        (is (identical? session-options result))
+        (is (= [[:intra-op 3]
+                [:inter-op 5]
+                [:optimization ai.onnxruntime.OrtSession$SessionOptions$OptLevel/ALL_OPT]
+                [:memory-pattern false]
+                [:cpu-arena false]
+                [:profiling "/tmp/embeddings-profile.json"]
+                [:log-level ai.onnxruntime.OrtLoggingLevel/ORT_LOGGING_LEVEL_WARNING]]
+               @calls))))))
+
+(deftest session-options-absent-by-default-test
+  (is (nil? (#'embeddings/->session-options nil nil)))
+  (is (nil? (#'embeddings/->session-options {} nil))))
+
 (deftest token-model-mean-pooling-test
   (when-fixtures
     (embeddings/with-model [model "fixtures/token-model" {:normalize? false
@@ -204,6 +246,24 @@
         (catch java.io.FileNotFoundException _
           false))))
 
+(deftest execution-provider-discovery-test
+  (let [discovery (ns-resolve 'embeddings.core 'execution-provider-discovery)]
+    (is (ifn? discovery))
+    (when (ifn? discovery)
+      (let [{:keys [available supported unresolved-blockers]} (discovery)]
+        (is (vector? available))
+        (is (every? keyword? available))
+        (is (contains? (set available) :cpu))
+        (is (vector? supported))
+        (is (every? keyword? supported))
+        (is (every? #(contains? (set supported) %)
+                    [:cuda :coreml :rocm :tensorrt :directml :xnnpack :webgpu]))
+        (is (vector? unresolved-blockers))
+        (is (every? #(and (keyword? (:provider %))
+                          (string? (:reason %)))
+                    unresolved-blockers))
+        (is (some #(= :vitis-ai (:provider %)) unresolved-blockers))))))
+
 (deftest named-output-and-position-input-api-test
   (is (some? (ns-resolve 'embeddings.core 'selected-output-name)))
   (let [input-tensors #'embeddings/input-tensors
@@ -264,9 +324,64 @@
                (mapv vec (.getValue ^ai.onnxruntime.OnnxTensor
                                     (.get ^java.util.Map (:inputs result)
                                           "custom_ids")))))
-        (finally
+      (finally
           (doseq [tensor (:tensors result)]
             (.close ^java.lang.AutoCloseable tensor)))))))
+
+(deftest input-tensor-type-follows-metadata-test
+  (let [input-tensors #'embeddings/input-tensors
+        encoded [{:ids [10 11]
+                  :attention-mask [1 1]}]
+        result (input-tensors
+                (ai.onnxruntime.OrtEnvironment/getEnvironment)
+                #{"input_ids" "attention_mask"}
+                encoded
+                nil
+                {"input_ids" ai.onnxruntime.OnnxJavaType/INT32
+                 "attention_mask" ai.onnxruntime.OnnxJavaType/INT64})]
+    (try
+      (is (= "[[I" (.getName (class (.getValue ^ai.onnxruntime.OnnxTensor
+                                                  (.get ^java.util.Map (:inputs result) "input_ids"))))))
+      (is (= "[[J" (.getName (class (.getValue ^ai.onnxruntime.OnnxTensor
+                                                  (.get ^java.util.Map (:inputs result) "attention_mask"))))))
+      (finally
+        (doseq [tensor (:tensors result)]
+          (.close ^java.lang.AutoCloseable tensor))))))
+
+(deftest alternate-output-dtypes-test
+  (let [output-embeddings #'embeddings/output-embeddings
+        masks (make-array Long/TYPE 1 2)
+        rank-2-double (make-array Double/TYPE 1 2)
+        rank-3-double (doto (make-array Double/TYPE 1 1 2)
+                        (aset-double 0 0 0 2.0)
+                        (aset-double 0 0 1 3.0))]
+    (aset-double rank-2-double 0 0 1.0)
+    (aset-double rank-2-double 0 1 2.0)
+    (aset-long masks 0 0 1)
+    (aset-long masks 0 1 1)
+    (is (approx= (farray 1.0 2.0)
+                 (first (output-embeddings rank-2-double masks
+                                            {:normalize? false}))))
+    (is (approx= (farray 2.0 3.0)
+                 (first (output-embeddings rank-3-double masks
+                                            {:pooling :cls :normalize? false}))))))
+
+(deftest float16-output-uses-runtime-conversion-test
+  (let [tensor (ai.onnxruntime.OnnxTensor/createTensor
+                (ai.onnxruntime.OrtEnvironment/getEnvironment)
+                (ShortBuffer/wrap (short-array [(short 0x3c00) (short 0x4000)]))
+                (long-array [1 2])
+                ai.onnxruntime.OnnxJavaType/FLOAT16)]
+    (try
+      (let [value (.getValue tensor)]
+        (is (= "[[F" (.getName (class value))))
+        (is (approx= (farray 1.0 2.0)
+                     (first ((deref #'embeddings/output-embeddings)
+                             value
+                             (make-array Long/TYPE 1 2)
+                             {:normalize? false})))))
+      (finally
+        (.close ^java.lang.AutoCloseable tensor)))))
 
 (deftest matryoshka-output-dimensions-test
   (let [postprocess #'embeddings/normalize-if-needed
