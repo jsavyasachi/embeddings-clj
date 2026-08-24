@@ -62,8 +62,16 @@ Hosted provider options include `:api-key`, `:model`, `:dimensions`,
 `:transport` for an injectable request function. Cohere and Voyage also accept
 `:input-type`. OpenAI accepts `:encoding-format` (`"float"` or `"base64"`),
 Cohere accepts `:truncate` and `:max-tokens`, and Voyage accepts
-`:output-dtype`. The transport receives `{:url :method :headers :body}` and
-must return `{:status :body}`.
+`:output-dtype`. Use `:headers` to add or override HTTP headers for hosted calls.
+Requests use a 10-second connection timeout and 60-second request timeout by
+default; configure these with `:connect-timeout-ms` and
+`:request-timeout-ms`. Transient HTTP failures are retried up to three times
+with exponential backoff and jitter. Configure this with `:max-retries`,
+`:retry-base-delay-ms`, `:retry-max-delay-ms`, and `:retry-jitter` (or inject
+`:sleep-fn` for tests). A numeric `Retry-After` response header on a 429 is
+honored in preference to the calculated delay. The transport receives
+`{:url :method :headers :body}` and must return `{:status :body}`, optionally
+with `:headers` for retry handling.
 
 ## Similarity search
 

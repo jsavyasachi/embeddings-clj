@@ -2,26 +2,36 @@
   "Hosted embedding providers that implement `embeddings.core/EmbeddingProvider`."
   (:require [clojure.data.json :as json]
             [embeddings.core :as embeddings])
-  (:import (java.net URI)
+  (:import (java.io IOException)
+           (java.net URI)
            (java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
                           HttpResponse$BodyHandlers)
            (java.nio ByteBuffer ByteOrder)
+           (java.time Duration Instant ZonedDateTime)
+           (java.time.format DateTimeFormatter)
            (java.util Base64)))
 
 (set! *warn-on-reflection* true)
 
 (defn- default-transport
-  [{:keys [url method headers body]}]
-  (let [builder (HttpRequest/newBuilder (URI/create ^String url))]
+  [{:keys [url method headers body]} opts]
+  (let [client (-> (HttpClient/newBuilder)
+                   (.connectTimeout (Duration/ofMillis
+                                     (long (or (:connect-timeout-ms opts) 10000))))
+                   (.build))
+        builder (HttpRequest/newBuilder (URI/create ^String url))]
     (doseq [[name value] headers]
       (.header builder ^String name ^String value))
+    (.timeout builder (Duration/ofMillis
+                       (long (or (:request-timeout-ms opts) 60000))))
     (.method builder
              ^String method
              (HttpRequest$BodyPublishers/ofString ^String body))
-    (let [response (.send (HttpClient/newHttpClient)
+    (let [response (.send client
                           (.build builder)
                           (HttpResponse$BodyHandlers/ofString))]
       {:status (.statusCode response)
+       :headers (into {} (.map (.headers response)))
        :body (.body response)})))
 
 (defn- json-map [value]
@@ -180,14 +190,65 @@
     :cohere (cohere-response provider response expected-count)
     (:openai :voyage) (indexed-response provider opts response expected-count)))
 
+(defn- retryable-status? [status]
+  (contains? #{408 429 500 502 503 504} status))
+
+(defn- retry-after-ms [response]
+  (let [value (or (get-in response [:headers "Retry-After"])
+                  (get-in response [:headers "retry-after"]))
+        value (if (coll? value) (first value) value)]
+    (when value
+      (try
+        (* 1000 (Long/parseLong ^String value))
+        (catch NumberFormatException _
+          (let [retry-at (ZonedDateTime/parse
+                          ^String value DateTimeFormatter/RFC_1123_DATE_TIME)]
+            (max 0 (.toMillis (Duration/between (Instant/now)
+                                                 (.toInstant retry-at))))))))))
+
+(defn- retry-delay-ms [opts response retry-number]
+  (or (retry-after-ms response)
+      (let [base (long (or (:retry-base-delay-ms opts) 100))
+            maximum (long (or (:retry-max-delay-ms opts) 10000))
+            jitter (double (or (:retry-jitter opts) 0.2))
+            backoff (min maximum (* base (long (Math/pow 2 (dec retry-number)))))
+            spread (* backoff jitter (- (* 2 (rand)) 1))]
+        (long (max 0 (+ backoff spread))))))
+
+(defn- request-headers [opts]
+  (merge {"Authorization" (str "Bearer " (:api-key opts))
+          "Content-Type" "application/json"}
+         (:headers opts)))
+
 (defn- request-batch
   [provider opts texts]
-  (let [transport (or (:transport opts) default-transport)
-        response (transport {:url (endpoint provider opts)
-                             :method "POST"
-                             :headers {"Authorization" (str "Bearer " (:api-key opts))
-                                       "Content-Type" "application/json"}
-                             :body (json-map (request-body provider opts texts))})
+  (let [transport (or (:transport opts) #(default-transport % opts))
+        request {:url (endpoint provider opts)
+                 :method "POST"
+                 :headers (request-headers opts)
+                 :body (json-map (request-body provider opts texts))}
+        max-retries (long (or (:max-retries opts) 3))
+        response (loop [retry-number 0]
+                   (let [attempt (try
+                                   {:response (transport request)}
+                                   (catch IOException exception
+                                     {:exception exception}))]
+                     (if-let [exception (:exception attempt)]
+                       (if (< retry-number max-retries)
+                         (do
+                           ((or (:sleep-fn opts) #(Thread/sleep (long %)))
+                            (retry-delay-ms opts nil (inc retry-number)))
+                           (recur (inc retry-number)))
+                         (throw exception))
+                       (let [response (:response attempt)
+                             status (long (:status response))]
+                         (if (and (< retry-number max-retries)
+                                  (retryable-status? status))
+                           (do
+                             ((or (:sleep-fn opts) #(Thread/sleep (long %)))
+                              (retry-delay-ms opts response (inc retry-number)))
+                             (recur (inc retry-number)))
+                           response)))))
         status (long (:status response))
         parsed (try
                  (parse-object (:body response))

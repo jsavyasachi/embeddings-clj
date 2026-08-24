@@ -3,7 +3,10 @@
             [clojure.test :refer [deftest is testing]]
             [embeddings.core :as embeddings]
             [embeddings.providers :as providers])
-  (:import (java.nio ByteBuffer ByteOrder)
+  (:import (java.io IOException)
+           (java.nio ByteBuffer ByteOrder)
+           (java.time ZonedDateTime ZoneOffset)
+           (java.time.format DateTimeFormatter)
            (java.util Base64)))
 
 (deftest hosted-adapters-implement-provider-test
@@ -32,6 +35,16 @@
     nil
     (catch clojure.lang.ExceptionInfo ex
       (ex-data ex))))
+
+(defn- success-response [request]
+  (let [inputs (get (request-body request) "input")]
+    {:status 200
+     :body (json/write-str
+            {"data" (map-indexed
+                      (fn [index text]
+                        {"index" index
+                         "embedding" [(count text) index]})
+                      inputs)})}))
 
 (deftest json-parsing-does-not-import-gson-test
   (is (not-any? #(-> ^Class % .getName (.startsWith "com.google.gson."))
@@ -217,3 +230,102 @@
     (is (= :voyage (:provider data)))
     (is (= 429 (:status data)))
     (is (= provider-error (:provider-error data)))))
+
+(deftest hosted-provider-custom-headers-test
+  (doseq [[constructor provider-name]
+          [[providers/openai :openai]
+           [providers/cohere :cohere]
+           [providers/voyage :voyage]]]
+    (let [request (atom nil)
+          provider (constructor {:api-key "key"
+                                 :model "model"
+                                 :headers {"X-Trace-Id" "trace"
+                                           "Content-Type" "custom/type"}
+                                 :transport (fn [value]
+                                              (reset! request value)
+                                              (if (= provider-name :cohere)
+                                                {:status 200
+                                                 :body "{\"embeddings\":{\"float\":[[1,2]]}}"}
+                                                (success-response value)))})]
+      (embeddings/embed provider "text")
+      (is (= "trace" (get-in @request [:headers "X-Trace-Id"])))
+      (is (= "custom/type" (get-in @request [:headers "Content-Type"]))))))
+
+(deftest hosted-provider-retries-transient-failure-test
+  (let [attempts (atom 0)
+        delays (atom [])
+        provider (providers/openai
+                  {:api-key "key"
+                   :model "model"
+                   :max-retries 1
+                   :retry-base-delay-ms 25
+                   :retry-jitter 0
+                   :sleep-fn #(swap! delays conj %)
+                   :transport (fn [request]
+                                (if (= 1 (swap! attempts inc))
+                                  {:status 500 :body "temporary"}
+                                  (success-response request)))})]
+    (is (= [[4.0 0.0]] (vectors (embeddings/embed-batch provider ["text"]))))
+    (is (= 2 @attempts))
+    (is (= [25] @delays))))
+
+(deftest hosted-provider-honors-retry-after-test
+  (let [attempts (atom 0)
+        delays (atom [])
+        provider (providers/openai
+                  {:api-key "key"
+                   :model "model"
+                   :max-retries 1
+                   :retry-base-delay-ms 25
+                   :retry-jitter 0
+                   :sleep-fn #(swap! delays conj %)
+                   :transport (fn [request]
+                                (if (= 1 (swap! attempts inc))
+                                  {:status 429
+                                   :headers {"Retry-After" "2"}
+                                   :body "rate limited"}
+                                  (success-response request)))})]
+    (is (= [[4.0 0.0]] (vectors (embeddings/embed-batch provider ["text"]))))
+    (is (= [2000] @delays))))
+
+(deftest hosted-provider-retries-transport-exception-test
+  (let [attempts (atom 0)
+        delays (atom [])
+        provider (providers/openai
+                  {:api-key "key"
+                   :model "model"
+                   :max-retries 1
+                   :retry-base-delay-ms 25
+                   :retry-jitter 0
+                   :sleep-fn #(swap! delays conj %)
+                   :transport (fn [request]
+                                (if (= 1 (swap! attempts inc))
+                                  (throw (IOException. "connection reset"))
+                                  (success-response request)))})]
+    (is (= [[4.0 0.0]] (vectors (embeddings/embed-batch provider ["text"]))))
+    (is (= 2 @attempts))
+    (is (= [25] @delays))))
+
+(deftest hosted-provider-honors-http-date-retry-after-test
+  (let [attempts (atom 0)
+        delays (atom [])
+        retry-at (-> (ZonedDateTime/now ZoneOffset/UTC)
+                     (.plusSeconds 5)
+                     (.withNano 0))
+        provider (providers/openai
+                  {:api-key "key"
+                   :model "model"
+                   :max-retries 1
+                   :retry-base-delay-ms 25
+                   :retry-jitter 0
+                   :sleep-fn #(swap! delays conj %)
+                   :transport (fn [request]
+                                (if (= 1 (swap! attempts inc))
+                                  {:status 429
+                                   :headers {"Retry-After"
+                                             (.format retry-at DateTimeFormatter/RFC_1123_DATE_TIME)}
+                                   :body "rate limited"}
+                                  (success-response request)))})]
+    (is (= [[4.0 0.0]] (vectors (embeddings/embed-batch provider ["text"]))))
+    (is (= 2 @attempts))
+    (is (<= 3000 (first @delays) 5000))))
