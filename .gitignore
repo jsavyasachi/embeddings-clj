@@ -9,3 +9,5 @@
 /fixtures
 /.venv
 release-notes.md
+/.worktrees/
+/.codex-runs/
