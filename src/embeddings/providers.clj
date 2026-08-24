@@ -29,6 +29,26 @@
   [^String body]
   (json/read-str body))
 
+(declare object-value)
+
+(defn- invalid-response
+  [provider reason data]
+  (throw (ex-info "invalid embedding provider response"
+                  (merge {:embeddings/error :invalid-provider-response
+                          :provider provider
+                          :reason reason}
+                         data))))
+
+(defn- provider-error-payload
+  [response]
+  (when (map? response)
+    (or (object-value response "error")
+        (when (and (or (contains? response "message")
+                       (contains? response "detail"))
+                   (not (contains? response "data"))
+                   (not (contains? response "embeddings")))
+          response))))
+
 (defn- object-value
   [object key]
   (get object key))
@@ -44,20 +64,69 @@
 (defn- float-vector
   ^floats
   [values]
-  (float-array (map float values)))
+  (if (sequential? values)
+    (float-array (map (fn [value]
+                        (if (number? value)
+                          (float value)
+                          (throw (ex-info "embedding contains a non-numeric value"
+                                          {:value value}))))
+                      values))
+    (throw (ex-info "embedding is not an array" {}))))
+
+(defn- validate-embeddings
+  [provider expected-count embeddings]
+  (let [actual-count (count embeddings)]
+    (when (not= expected-count actual-count)
+      (invalid-response provider :count-mismatch
+                        {:expected-count expected-count
+                         :actual-count actual-count}))
+    (let [dimensions (mapv (fn [^floats embedding]
+                             (alength embedding))
+                           embeddings)]
+      (when (and (seq dimensions)
+                 (not (apply = dimensions)))
+        (invalid-response provider :inconsistent-dimensions
+                          {:dimensions dimensions})))
+    embeddings))
 
 (defn- indexed-response
-  [response]
-  (->> (array response "data")
-       (map (fn [entry]
-              [(int (object-value entry "index"))
-               (float-vector (array entry "embedding"))]))
-       (sort-by first)
-       (mapv second)))
+  [provider response expected-count]
+  (let [data (array response "data")]
+    (if (sequential? data)
+      (->> data
+           (map (fn [entry]
+                  (if (map? entry)
+                    (let [index (object-value entry "index")]
+                      (if (number? index)
+                        [(int index)
+                         (try
+                           (float-vector (array entry "embedding"))
+                           (catch clojure.lang.ExceptionInfo ex
+                             (invalid-response provider :invalid-embedding
+                                               {:cause (ex-data ex)})))]
+                        (invalid-response provider :invalid-entry
+                                          {:entry entry})))
+                    (invalid-response provider :invalid-entry
+                                      {:entry entry}))))
+           (sort-by first)
+           (mapv second)
+           (validate-embeddings provider expected-count))
+      (invalid-response provider :invalid-data {:data data}))))
 
 (defn- cohere-response
-  [response]
-  (mapv float-vector (array (object response "embeddings") "float")))
+  [provider response expected-count]
+  (let [embeddings (array (object response "embeddings") "float")]
+    (if (sequential? embeddings)
+      (try
+        (validate-embeddings provider expected-count (mapv float-vector embeddings))
+        (catch clojure.lang.ExceptionInfo ex
+          (if (= :invalid-provider-response
+                 (:embeddings/error (ex-data ex)))
+            (throw ex)
+            (invalid-response provider :invalid-embedding
+                              {:cause (ex-data ex)}))))
+      (invalid-response provider :invalid-embeddings
+                        {:embeddings embeddings}))))
 
 (defn- endpoint [provider opts]
   (or (:url opts)
@@ -87,11 +156,10 @@
       (:input-type opts) (assoc "input_type" (:input-type opts))
       (:dimensions opts) (assoc "output_dimension" (:dimensions opts)))))
 
-(defn- parse-response [provider body]
-  (let [response (parse-object body)]
+(defn- parse-response [provider response expected-count]
     (case provider
-      :cohere (cohere-response response)
-      (:openai :voyage) (indexed-response response))))
+      :cohere (cohere-response provider response expected-count)
+      (:openai :voyage) (indexed-response provider response expected-count)))
 
 (defn- request-batch
   [provider opts texts]
@@ -101,14 +169,28 @@
                              :headers {"Authorization" (str "Bearer " (:api-key opts))
                                        "Content-Type" "application/json"}
                              :body (json-map (request-body provider opts texts))})
-        status (long (:status response))]
+        status (long (:status response))
+        parsed (try
+                 (parse-object (:body response))
+                 (catch Exception ex
+                   (invalid-response provider :malformed-json
+                                     {:status status
+                                      :body (:body response)
+                                      :cause (.getMessage ex)})))]
+    (when-let [provider-error (provider-error-payload parsed)]
+      (throw (ex-info "embedding provider returned an error"
+                      {:embeddings/error :provider-error
+                       :provider provider
+                       :status status
+                       :provider-error provider-error
+                       :body (:body response)})))
     (when-not (<= 200 status 299)
       (throw (ex-info (str "embedding request failed with HTTP " status)
                       {:embeddings/error :provider-request-failed
                        :provider provider
                        :status status
                        :body (:body response)})))
-    (parse-response provider (:body response))))
+    (parse-response provider parsed (count texts))))
 
 (declare hosted-embed-batch)
 
@@ -136,6 +218,7 @@
                      []
                      (into [] (mapcat #(request-batch provider opts (vec %)))
                            (partition-all batch-size texts)))]
+    (validate-embeddings provider (count texts) embeddings)
     (when-let [^floats first-embedding (first embeddings)]
       (reset! dimensions (alength first-embedding)))
     embeddings))

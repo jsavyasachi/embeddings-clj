@@ -16,6 +16,13 @@
 (defn- vectors [embeddings]
   (mapv vec embeddings))
 
+(defn- thrown-data [f]
+  (try
+    (f)
+    nil
+    (catch clojure.lang.ExceptionInfo ex
+      (ex-data ex))))
+
 (deftest json-parsing-does-not-import-gson-test
   (is (not-any? #(-> ^Class % .getName (.startsWith "com.google.gson."))
                 (concat (vals (ns-imports 'embeddings.core))
@@ -85,8 +92,17 @@
                    :dimensions 2
                    :transport (fn [value]
                                 (reset! request value)
-                                {:status 200
-                                 :body "{\"data\":[{\"index\":1,\"embedding\":[3,4]},{\"index\":0,\"embedding\":[1,2]}]}"})})]
+                                (let [inputs (get (request-body value) "input")]
+                                  {:status 200
+                                   :body (json/write-str
+                                          {"data" (reverse
+                                                    (map-indexed
+                                                     (fn [index _]
+                                                       {"index" index
+                                                        "embedding" (if (zero? index)
+                                                                      [1 2]
+                                                                      [3 4])})
+                                                     inputs))})}))})]
     (testing "response indexes restore the input order"
       (is (= [[1.0 2.0] [3.0 4.0]]
              (vectors (embeddings/embed-batch provider ["one" "two"])))))
@@ -99,3 +115,40 @@
            (request-body @request)))
     (is (= [1.0 2.0] (vec (embeddings/embed provider "one"))))
     (is (= 2 (embeddings/dimension provider)))))
+
+(deftest hosted-response-count-must-match-input-count-test
+  (let [provider (providers/openai
+                  {:model "model"
+                   :transport (fn [_]
+                                {:status 200
+                                 :body "{\"data\":[{\"index\":0,\"embedding\":[1,2]}]}"})})
+        data (thrown-data #(embeddings/embed-batch provider ["one" "two"]))]
+    (is (= :invalid-provider-response (:embeddings/error data)))
+    (is (= :count-mismatch (:reason data)))
+    (is (= 2 (:expected-count data)))
+    (is (= 1 (:actual-count data)))))
+
+(deftest hosted-response-dimensions-must-be-consistent-test
+  (let [provider (providers/cohere
+                  {:model "model"
+                   :transport (fn [_]
+                                {:status 200
+                                 :body "{\"embeddings\":{\"float\":[[1,2],[3]]}}"})})
+        data (thrown-data #(embeddings/embed-batch provider ["one" "two"]))]
+    (is (= :invalid-provider-response (:embeddings/error data)))
+    (is (= :inconsistent-dimensions (:reason data)))
+    (is (= [2 1] (:dimensions data)))))
+
+(deftest hosted-provider-error-payload-is-typed-test
+  (let [provider-error {"message" "rate limited"
+                        "type" "rate_limit_error"}
+        provider (providers/voyage
+                  {:model "model"
+                   :transport (fn [_]
+                                {:status 429
+                                 :body (json/write-str {"error" provider-error})})})
+        data (thrown-data #(embeddings/embed-batch provider ["one"]))]
+    (is (= :provider-error (:embeddings/error data)))
+    (is (= :voyage (:provider data)))
+    (is (= 429 (:status data)))
+    (is (= provider-error (:provider-error data)))))
