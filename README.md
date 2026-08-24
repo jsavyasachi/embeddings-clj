@@ -68,6 +68,11 @@ return `{:status :body}`.
 `embeddings.core/load-model` accepts pooling, normalization,
 maximum-length, and execution-provider options, plus:
 
+- `embeddings.core/execution-provider-discovery` reports the providers exposed
+  by the current ONNX Runtime, the providers this library can configure, and
+  unresolved provider blockers. Configurable providers include CPU, CoreML,
+  and WebGPU.
+
 - `:output-name`: select a named ONNX graph output.
 - `:input-schema`: map custom ONNX input names to an encoded source keyword or
   `{:source keyword :pad-value number}`. Built-in inputs include `input_ids`,

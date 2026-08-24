@@ -204,6 +204,24 @@
         (catch java.io.FileNotFoundException _
           false))))
 
+(deftest execution-provider-discovery-test
+  (let [discovery (ns-resolve 'embeddings.core 'execution-provider-discovery)]
+    (is (ifn? discovery))
+    (when (ifn? discovery)
+      (let [{:keys [available supported unresolved-blockers]} (discovery)]
+        (is (vector? available))
+        (is (every? keyword? available))
+        (is (contains? (set available) :cpu))
+        (is (vector? supported))
+        (is (every? keyword? supported))
+        (is (every? #(contains? (set supported) %)
+                    [:cuda :coreml :rocm :tensorrt :directml :xnnpack :webgpu]))
+        (is (vector? unresolved-blockers))
+        (is (every? #(and (keyword? (:provider %))
+                          (string? (:reason %)))
+                    unresolved-blockers))
+        (is (some #(= :vitis-ai (:provider %)) unresolved-blockers))))))
+
 (deftest named-output-and-position-input-api-test
   (is (some? (ns-resolve 'embeddings.core 'selected-output-name)))
   (let [input-tensors #'embeddings/input-tensors
