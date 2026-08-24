@@ -8,7 +8,9 @@
   (:import (ai.onnxruntime NodeInfo OnnxTensor OnnxValue OrtEnvironment OrtSession
                            OrtException TensorInfo)
            (ai.onnxruntime OrtSession$Result)
-           (ai.onnxruntime OrtSession$SessionOptions)
+           (ai.onnxruntime OrtLoggingLevel
+                           OrtSession$SessionOptions
+                           OrtSession$SessionOptions$OptLevel)
            (java.io File)
            (java.util Collections HashMap Map)))
 
@@ -195,12 +197,70 @@
       (catch UnsatisfiedLinkError ex
         (provider-unavailable provider ex)))))
 
+(def ^:private session-option-keys
+  [:intra-op-num-threads
+   :inter-op-num-threads
+   :graph-optimization-level
+   :memory-pattern-optimization?
+   :cpu-arena-allocator?
+   :profiling-output-path
+   :session-log-level])
+
+(def ^:private optimization-levels
+  {:no-opt OrtSession$SessionOptions$OptLevel/NO_OPT
+   :basic OrtSession$SessionOptions$OptLevel/BASIC_OPT
+   :extended OrtSession$SessionOptions$OptLevel/EXTENDED_OPT
+   :layout OrtSession$SessionOptions$OptLevel/LAYOUT_OPT
+   :all OrtSession$SessionOptions$OptLevel/ALL_OPT})
+
+(def ^:private log-levels
+  {:verbose OrtLoggingLevel/ORT_LOGGING_LEVEL_VERBOSE
+   :info OrtLoggingLevel/ORT_LOGGING_LEVEL_INFO
+   :warning OrtLoggingLevel/ORT_LOGGING_LEVEL_WARNING
+   :error OrtLoggingLevel/ORT_LOGGING_LEVEL_ERROR
+   :fatal OrtLoggingLevel/ORT_LOGGING_LEVEL_FATAL})
+
+(defn- new-session-options
+  ^OrtSession$SessionOptions
+  []
+  (OrtSession$SessionOptions.))
+
+(defn- configure-session-options!
+  [^OrtSession$SessionOptions session-options opts]
+  (when-let [value (:intra-op-num-threads opts)]
+    (.setIntraOpNumThreads session-options (int value)))
+  (when-let [value (:inter-op-num-threads opts)]
+    (.setInterOpNumThreads session-options (int value)))
+  (when-let [value (:graph-optimization-level opts)]
+    (if-let [level (get optimization-levels value)]
+      (.setOptimizationLevel session-options level)
+      (throw (ex-info "unknown graph optimization level"
+                      {:embeddings/error :unknown-graph-optimization-level
+                       :graph-optimization-level value}))))
+  (when (contains? opts :memory-pattern-optimization?)
+    (.setMemoryPatternOptimization session-options
+                                   (boolean (:memory-pattern-optimization? opts))))
+  (when (contains? opts :cpu-arena-allocator?)
+    (.setCPUArenaAllocator session-options
+                           (boolean (:cpu-arena-allocator? opts))))
+  (when-let [path (:profiling-output-path opts)]
+    (.enableProfiling session-options ^String path))
+  (when-let [value (:session-log-level opts)]
+    (if-let [level (get log-levels value)]
+      (.setSessionLogLevel session-options level)
+      (throw (ex-info "unknown session log level"
+                      {:embeddings/error :unknown-session-log-level
+                       :session-log-level value}))))
+  session-options)
+
 (defn- ->session-options
   ^OrtSession$SessionOptions
-  [execution-providers]
-  (when (seq execution-providers)
-    (let [session-options (OrtSession$SessionOptions.)]
+  [opts execution-providers]
+  (when (or (seq execution-providers)
+            (some #(contains? opts %) session-option-keys))
+    (let [session-options (new-session-options)]
       (try
+        (configure-session-options! session-options opts)
         (doseq [entry execution-providers]
           (add-execution-provider! session-options entry))
         session-options
@@ -243,8 +303,13 @@
   Options include `:pooling` (`:mean`, `:mean-sqrt-len`, `:cls`, `:max`),
   `:normalize?`, `:max-length`, and `:execution-providers`, a vector of
   provider keywords or maps such as `[:coreml]`, `[:cuda]`, or
-  `[{:provider :cuda :device-id 0}]`. CPU is the implicit fallback if execution
-  providers are absent or empty."
+  `[{:provider :cuda :device-id 0}]`. Session performance options include
+  `:intra-op-num-threads`, `:inter-op-num-threads`,
+  `:graph-optimization-level` (`:no-opt`, `:basic`, `:extended`, `:layout`,
+  or `:all`), `:memory-pattern-optimization?`, `:cpu-arena-allocator?`,
+  `:profiling-output-path`, and `:session-log-level` (`:verbose`, `:info`,
+  `:warning`, `:error`, or `:fatal`). CPU is the implicit fallback if
+  execution providers are absent or empty."
   ([model-dir]
    (load-model model-dir nil))
   ([model-dir opts]
@@ -260,7 +325,7 @@
                             :path (.getPath tokenizer-file)})))
      (let [resolved-opts (merge default-opts (model-config-opts model-dir) opts)
            env (OrtEnvironment/getEnvironment)
-           session-options (->session-options (:execution-providers opts))
+           session-options (->session-options opts (:execution-providers opts))
            session (if session-options
                      (try
                        (.createSession ^OrtEnvironment env (.getPath model-file) session-options)

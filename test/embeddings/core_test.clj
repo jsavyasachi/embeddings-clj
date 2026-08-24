@@ -122,6 +122,47 @@
           (is (= :cuda (:provider (ex-data ex))))
           (is (some? (ex-cause ex))))))))
 
+(deftest session-options-performance-controls-test
+  (let [calls (atom [])
+        session-options (proxy [ai.onnxruntime.OrtSession$SessionOptions] []
+                          (setIntraOpNumThreads [value]
+                            (swap! calls conj [:intra-op value]))
+                          (setInterOpNumThreads [value]
+                            (swap! calls conj [:inter-op value]))
+                          (setOptimizationLevel [value]
+                            (swap! calls conj [:optimization value]))
+                          (setMemoryPatternOptimization [value]
+                            (swap! calls conj [:memory-pattern value]))
+                          (setCPUArenaAllocator [value]
+                            (swap! calls conj [:cpu-arena value]))
+                          (enableProfiling [value]
+                            (swap! calls conj [:profiling value]))
+                          (setSessionLogLevel [value]
+                            (swap! calls conj [:log-level value])))]
+    (with-redefs [embeddings/new-session-options (constantly session-options)]
+      (let [result (#'embeddings/->session-options
+                    {:intra-op-num-threads 3
+                     :inter-op-num-threads 5
+                     :graph-optimization-level :all
+                     :memory-pattern-optimization? false
+                     :cpu-arena-allocator? false
+                     :profiling-output-path "/tmp/embeddings-profile.json"
+                     :session-log-level :warning}
+                    nil)]
+        (is (identical? session-options result))
+        (is (= [[:intra-op 3]
+                [:inter-op 5]
+                [:optimization ai.onnxruntime.OrtSession$SessionOptions$OptLevel/ALL_OPT]
+                [:memory-pattern false]
+                [:cpu-arena false]
+                [:profiling "/tmp/embeddings-profile.json"]
+                [:log-level ai.onnxruntime.OrtLoggingLevel/ORT_LOGGING_LEVEL_WARNING]]
+               @calls))))))
+
+(deftest session-options-absent-by-default-test
+  (is (nil? (#'embeddings/->session-options nil nil)))
+  (is (nil? (#'embeddings/->session-options {} nil))))
+
 (deftest token-model-mean-pooling-test
   (when-fixtures
     (embeddings/with-model [model "fixtures/token-model" {:normalize? false
