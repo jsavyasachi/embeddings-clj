@@ -4,7 +4,9 @@
             [embeddings.core :as embeddings])
   (:import (java.net URI)
            (java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
-                          HttpResponse$BodyHandlers)))
+                          HttpResponse$BodyHandlers)
+           (java.nio ByteBuffer ByteOrder)
+           (java.util Base64)))
 
 (set! *warn-on-reflection* true)
 
@@ -46,12 +48,25 @@
   [values]
   (float-array (map float values)))
 
+(defn- base64-float-vector
+  ^floats
+  [^String value]
+  (let [^bytes bytes (.decode (Base64/getDecoder) value)
+        ^ByteBuffer buffer (doto (ByteBuffer/wrap bytes)
+                              (.order ByteOrder/LITTLE_ENDIAN))
+        result (float-array (quot (alength bytes) 4))]
+    (dotimes [index (alength result)]
+      (aset-float result index (.getFloat buffer)))
+    result))
+
 (defn- indexed-response
-  [response]
+  [response opts]
   (->> (array response "data")
        (map (fn [entry]
               [(int (object-value entry "index"))
-               (float-vector (array entry "embedding"))]))
+               (if (= "base64" (:encoding-format opts))
+                 (base64-float-vector (array entry "embedding"))
+                 (float-vector (array entry "embedding")))]))
        (sort-by first)
        (mapv second)))
 
@@ -72,26 +87,30 @@
     :openai
     (cond-> {"model" (:model opts)
              "input" texts}
-      (:dimensions opts) (assoc "dimensions" (:dimensions opts)))
+      (:dimensions opts) (assoc "dimensions" (:dimensions opts))
+      (:encoding-format opts) (assoc "encoding_format" (:encoding-format opts)))
 
     :cohere
     (cond-> {"model" (:model opts)
              "texts" texts
              "embedding_types" ["float"]}
       (:input-type opts) (assoc "input_type" (:input-type opts))
-      (:dimensions opts) (assoc "output_dimension" (:dimensions opts)))
+      (:dimensions opts) (assoc "output_dimension" (:dimensions opts))
+      (:truncate opts) (assoc "truncate" (:truncate opts))
+      (:max-tokens opts) (assoc "max_tokens" (:max-tokens opts)))
 
     :voyage
     (cond-> {"model" (:model opts)
              "input" texts}
       (:input-type opts) (assoc "input_type" (:input-type opts))
-      (:dimensions opts) (assoc "output_dimension" (:dimensions opts)))))
+      (:dimensions opts) (assoc "output_dimension" (:dimensions opts))
+      (:output-dtype opts) (assoc "output_dtype" (:output-dtype opts)))))
 
-(defn- parse-response [provider body]
+(defn- parse-response [provider opts body]
   (let [response (parse-object body)]
     (case provider
       :cohere (cohere-response response)
-      (:openai :voyage) (indexed-response response))))
+      (:openai :voyage) (indexed-response response opts))))
 
 (defn- request-batch
   [provider opts texts]
@@ -108,7 +127,7 @@
                        :provider provider
                        :status status
                        :body (:body response)})))
-    (parse-response provider (:body response))))
+    (parse-response provider opts (:body response))))
 
 (declare hosted-embed-batch)
 
