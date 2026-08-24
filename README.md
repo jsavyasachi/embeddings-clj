@@ -63,6 +63,28 @@ Hosted provider options include `:api-key`, `:model`, `:dimensions`,
 `:input-type`. The transport receives `{:url :method :headers :body}` and must
 return `{:status :body}`.
 
+## Similarity search
+
+The `embeddings.search` namespace ranks in-memory `float[]` embeddings without
+network or model access. It supports dot-product or cosine scoring, stable
+top-k ranking, predicate filtering, and reusable brute-force indexes:
+
+```clojure
+(require '[embeddings.search :as search])
+
+(search/search query candidates {:metric :cosine
+                                 :k 5
+                                 :predicate #(not (:deleted? %))
+                                 :vector-fn :embedding})
+
+(def index (search/build-index candidates :embedding))
+(search/query index query {:metric :cosine :k 5})
+```
+
+Candidates must contain `float[]` vectors (or be `float[]` vectors themselves).
+Ties retain candidate order; dimensions must match, and `k` must be a
+non-negative integer.
+
 ## Local model options
 
 `embeddings.core/load-model` accepts pooling, normalization,
