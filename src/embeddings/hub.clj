@@ -114,22 +114,98 @@
 (defn- default-http-client
   ^HttpClient []
   (-> (HttpClient/newBuilder)
-      ;; HF resolve URLs redirect to a content-serving URL. HttpClient's
-      ;; default is NEVER, so opt into the normal safe redirect policy.
-      (.followRedirects HttpClient$Redirect/NORMAL)
+      ;; HF resolve URLs redirect to a content-serving host. HttpClient
+      ;; would happily follow that itself, but it also copies request
+      ;; headers -- including Authorization -- onto the redirected request
+      ;; even across origins. So redirects are followed manually below,
+      ;; where the token can be dropped on a cross-origin hop.
+      (.followRedirects HttpClient$Redirect/NEVER)
       (.build)))
 
-(defn- default-transport [{:keys [url method headers]}]
-  (let [builder (HttpRequest/newBuilder (URI/create ^String url))]
+(def ^:private redirect-statuses #{301 302 303 307 308})
+
+(def ^:private max-redirects
+  "Small bound on a redirect chain; a legitimate HF resolve URL redirects
+  once. Anything past this is treated as a loop, not a slow chain."
+  5)
+
+(defn- effective-port
+  "`URI` port, defaulting per scheme when unspecified (`-1`), so an implicit
+  and an explicit default port compare as the same origin."
+  ^long [^URI uri]
+  (let [port (.getPort uri)]
+    (if (pos? port)
+      port
+      (case (.getScheme uri)
+        "https" 443
+        "http" 80
+        -1))))
+
+(defn- same-origin?
+  "Scheme, host, and (defaulted) port must all match. A scheme downgrade
+  (`https` -> `http`) counts as a different origin even on the same host."
+  [^URI a ^URI b]
+  (and (= (.getScheme a) (.getScheme b))
+       (= (.getHost a) (.getHost b))
+       (= (effective-port a) (effective-port b))))
+
+(defn- response-header
+  "First value of a response header, tolerant of both the
+  `java.util.List` values `HttpHeaders/map` produces and the plain
+  strings or vectors stub transports use in tests."
+  [headers name]
+  (some (fn [[k v]]
+          (when (= name (str/lower-case (str k)))
+            (cond
+              (string? v) v
+              (instance? java.util.List v) (first v)
+              (sequential? v) (first v)
+              :else (str v))))
+        headers))
+
+(defn- redirect-location
+  ^URI [^URI current headers]
+  (if-let [location (response-header headers "location")]
+    (.resolve current ^String location)
+    (throw (ex-info (str "Redirect response missing Location header: " current)
+                    {:embeddings/error :invalid-redirect :url (str current)}))))
+
+(defn- send-once [^HttpClient client ^String method ^URI uri headers]
+  (let [builder (HttpRequest/newBuilder uri)]
     (doseq [[name value] headers]
       (.header builder ^String name ^String value))
-    (let [^java.net.http.HttpResponse resp (.send (default-http-client)
-                      (.method builder ^String method
-                              (HttpRequest$BodyPublishers/ofString ""))
-                      (HttpResponse$BodyHandlers/ofByteArray))]
+    (let [^java.net.http.HttpResponse resp
+          (.send client
+                (.build (.method builder ^String method (HttpRequest$BodyPublishers/ofString "")))
+                (HttpResponse$BodyHandlers/ofByteArray))]
       {:status (.statusCode resp)
        :headers (into {} (.map (.headers resp)))
        :body (.body resp)})))
+
+(defn- default-transport [{:keys [url method headers]}]
+  (let [client (default-http-client)]
+    (loop [^URI uri (URI/create ^String url)
+           req-headers headers
+           method method
+           redirects 0]
+      (let [response (send-once client method uri req-headers)
+            status (long (:status response))]
+        (if (contains? redirect-statuses status)
+          (do
+            (when (>= redirects max-redirects)
+              (throw (ex-info (str "Too many redirects (> " max-redirects ") for " url)
+                              {:embeddings/error :too-many-redirects :url url})))
+            (let [target (redirect-location uri (:headers response))
+                  ;; Authorization never crosses an origin boundary. Every
+                  ;; other header (including Range, for resumes) rides along.
+                  next-headers (if (same-origin? uri target)
+                                 req-headers
+                                 (dissoc req-headers "Authorization"))
+                  ;; 303 always turns the follow-up into a GET; every request
+                  ;; in this namespace is already GET, so this is a no-op.
+                  next-method (if (= status 303) "GET" method)]
+              (recur target next-headers next-method (inc redirects))))
+          response)))))
 
 (defn- auth-token [opts]
   (or (:token opts) (:hf-token opts) (environment-token)))

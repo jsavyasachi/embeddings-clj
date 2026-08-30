@@ -3,7 +3,9 @@
             [clojure.data.json :as json]
             [clojure.test :refer [deftest is testing]]
             [embeddings.hub :as hub])
-  (:import (java.nio.file Files)
+  (:import (com.sun.net.httpserver HttpExchange HttpHandler HttpServer)
+           (java.net InetSocketAddress URI)
+           (java.nio.file Files)
            (java.math BigInteger)
            (java.security MessageDigest)))
 
@@ -57,10 +59,130 @@
     (is (every? #(= "Bearer explicit-token" (get-in % [:headers "Authorization"]))
                 @requests))))
 
-(deftest default-transport-follows-normal-redirects
-  (is (= java.net.http.HttpClient$Redirect/NORMAL
+(deftest default-http-client-does-not-auto-follow-redirects
+  ;; `default-transport` now follows redirects itself (see the tests below)
+  ;; so it can drop `Authorization` on a cross-origin hop. The underlying
+  ;; `HttpClient` must therefore never auto-follow, or a same-process
+  ;; redirect would be followed twice.
+  (is (= java.net.http.HttpClient$Redirect/NEVER
          (.followRedirects ^java.net.http.HttpClient
                            ((deref #'hub/default-http-client))))))
+
+;; --- Finding 1: default-transport must not leak Authorization across
+;; --- origins on redirect. These use real loopback HTTP servers because the
+;; --- bug lives in java.net.http.HttpClient's redirect handling, which stub
+;; --- transports never exercise.
+
+(defn- respond! [^HttpExchange exchange status ^String body]
+  (let [^bytes bytes (.getBytes body "UTF-8")]
+    (.sendResponseHeaders exchange status (count bytes))
+    (with-open [os (.getResponseBody exchange)]
+      (.write os bytes))))
+
+(defn- redirect! [^HttpExchange exchange status ^String location]
+  (.set (.getResponseHeaders exchange) "Location" location)
+  (.sendResponseHeaders exchange status -1)
+  (.close exchange))
+
+(defn- start-server ^HttpServer [^HttpHandler handler]
+  (let [server (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)]
+    (.createContext server "/" handler)
+    (.setExecutor server nil)
+    (.start server)
+    server))
+
+(defn- server-url ^String [^HttpServer server ^String path]
+  (str "http://127.0.0.1:" (.getPort (.getAddress server)) path))
+
+(def ^:private default-transport (deref #'hub/default-transport))
+
+(deftest default-transport-strips-authorization-across-origins
+  (let [target-auth (atom :not-called)
+        target (start-server
+                (reify HttpHandler
+                  (handle [_ exchange]
+                    (reset! target-auth (.getFirst (.getRequestHeaders ^HttpExchange exchange) "Authorization"))
+                    (respond! exchange 200 "target-body"))))
+        origin (start-server
+                (reify HttpHandler
+                  (handle [_ exchange]
+                    (redirect! exchange 302 (server-url target "/file")))))]
+    (try
+      (let [response (default-transport {:url (server-url origin "/redirect")
+                                         :method "GET"
+                                         :headers {"Authorization" "Bearer SECRET-HF-TOKEN"}})]
+        (is (= 200 (:status response)))
+        (is (= "target-body" (String. ^bytes (:body response) "UTF-8")))
+        (is (nil? @target-auth)
+            "Authorization must not reach a different origin"))
+      (finally
+        (.stop origin 0)
+        (.stop target 0)))))
+
+(deftest default-transport-preserves-authorization-and-range-within-origin
+  (let [received (atom nil)
+        server (start-server
+                (reify HttpHandler
+                  (handle [_ exchange]
+                    (let [^HttpExchange exchange exchange]
+                      (if (= "/redirect" (.getPath (.getRequestURI exchange)))
+                        ;; Relative Location must resolve against the current URL.
+                        (redirect! exchange 302 "/final")
+                        (do (reset! received
+                                    {:auth (.getFirst (.getRequestHeaders exchange) "Authorization")
+                                     :range (.getFirst (.getRequestHeaders exchange) "Range")})
+                            (respond! exchange 200 "ok")))))))]
+    (try
+      (let [response (default-transport {:url (server-url server "/redirect")
+                                         :method "GET"
+                                         :headers {"Authorization" "Bearer token"
+                                                   "Range" "bytes=5-"}})]
+        (is (= 200 (:status response)))
+        (is (= "Bearer token" (:auth @received)))
+        (is (= "bytes=5-" (:range @received))))
+      (finally (.stop server 0)))))
+
+(deftest default-transport-follows-all-redirect-statuses
+  ;; 301, 302, 303, 307, 308 all matter; 303 also turns the follow-up into a
+  ;; GET, which is a no-op here since every request in this namespace is GET.
+  (doseq [status [301 302 303 307 308]]
+    (let [server (start-server
+                  (reify HttpHandler
+                    (handle [_ exchange]
+                      (let [^HttpExchange exchange exchange]
+                        (if (= "/start" (.getPath (.getRequestURI exchange)))
+                          (redirect! exchange status "/end")
+                          (respond! exchange 200 "ok"))))))]
+      (try
+        (is (= 200 (:status (default-transport {:url (server-url server "/start")
+                                                :method "GET" :headers {}})))
+            (str "status " status))
+        (finally (.stop server 0))))))
+
+(deftest default-transport-caps-redirect-chain
+  (let [server (start-server
+                (reify HttpHandler
+                  (handle [_ exchange]
+                    (let [^HttpExchange exchange exchange]
+                      (redirect! exchange 302 (.toString (.getRequestURI exchange)))))))]
+    (try
+      (is (= :too-many-redirects
+             (try (default-transport {:url (server-url server "/loop")
+                                      :method "GET" :headers {}})
+                  (catch clojure.lang.ExceptionInfo e (:embeddings/error (ex-data e))))))
+      (finally (.stop server 0)))))
+
+(deftest same-origin-checks-scheme-host-and-port
+  (let [same-origin? (deref #'hub/same-origin?)]
+    (is (true? (same-origin? (URI/create "https://a.example/x") (URI/create "https://a.example/y"))))
+    (is (true? (same-origin? (URI/create "https://a.example") (URI/create "https://a.example:443/y")))
+        "default https port must be treated as equivalent to an explicit :443")
+    (is (false? (same-origin? (URI/create "https://a.example") (URI/create "http://a.example")))
+        "a scheme downgrade is a different origin even on the same host")
+    (is (false? (same-origin? (URI/create "https://a.example") (URI/create "https://b.example")))
+        "different host")
+    (is (false? (same-origin? (URI/create "https://a.example:443") (URI/create "https://a.example:8443")))
+        "different port")))
 
 (deftest secure-download-skips-checksum-for-ordinary-files
   (let [^java.io.File dir (tmp-dir)

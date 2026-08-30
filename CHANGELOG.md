@@ -10,6 +10,14 @@
   (`{:embeddings/error :invalid-revision}`). The model cache root is now also
   checked to stay inside the cache dir
   (`{:embeddings/error :invalid-cache-path}`).
+- Stop leaking the `Authorization` bearer token to redirect targets outside
+  the requested origin. `java.net.http.HttpClient` copies request headers
+  onto a followed redirect even across origins, so a Hub `resolve` URL that
+  redirects to a content-serving host received the caller's token. Redirects
+  are now followed manually, with `Authorization` dropped as soon as the
+  scheme, host, or port changes (a `https` -> `http` downgrade on the same
+  host counts as a change), capped at 5 hops
+  (`{:embeddings/error :too-many-redirects}`).
 
 ## [0.6.0] - 2026-08-24
 
