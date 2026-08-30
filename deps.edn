@@ -3,7 +3,7 @@
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
         org.clojure/data.json {:mvn/version "2.5.2"}
         com.microsoft.onnxruntime/onnxruntime {:mvn/version "1.29.0"}
-        net.clojars.savya/tokenizers-clj {:mvn/version "0.4.0"}}
+        net.clojars.savya/tokenizers-clj {:mvn/version "0.11.0"}}
 
  :aliases
  {:test

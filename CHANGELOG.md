@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-30
+
 ### Security
 
 - Validate the `:revision` option before it reaches the filesystem or the Hub
