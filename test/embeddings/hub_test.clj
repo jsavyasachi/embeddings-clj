@@ -257,13 +257,21 @@
   (let [^java.io.File dir (tmp-dir)
         requests (atom [])
         files {"onnx/model.onnx" "model" "tokenizer.json" "tokenizer"}
-        transport (fn [{:keys [url] :as request}]
+        ;; A real HF server only answers 206 + Content-Range when a Range
+        ;; header was actually sent; it answers 200 with the full body
+        ;; otherwise. tokenizer.json has no pre-existing `.part` here, so it
+        ;; must take the plain 200 path.
+        transport (fn [{:keys [url headers] :as request}]
                     (swap! requests conj request)
                     (if (re-find #"/api/models/.*/tree/" url)
                       {:status 200 :headers {} :body (manifest files)}
-                      {:status 206
-                       :headers {"content-range" "bytes 2-4/5"}
-                       :body (if (re-find #"tokenizer" url) "tokenizer" "del")}))
+                      (if-let [range (get headers "Range")]
+                        (let [start (Long/parseLong (second (re-find #"bytes=(\d+)-" range)))]
+                          {:status 206
+                           :headers {"content-range" (str "bytes " start "-4/5")}
+                           :body (if (re-find #"tokenizer" url) "tokenizer" "del")})
+                        {:status 200 :headers {}
+                         :body (get files (last (re-find #"/resolve/[^/]+/(.*)$" url)))})))
         root (io/file dir "org/model")]
     (.mkdirs root)
     (spit (io/file root "model.onnx.part") "mo")
@@ -271,6 +279,69 @@
                                    :transport transport})
     (is (= "model" (slurp (io/file root "model.onnx"))))
     (is (= "bytes=2-" (some #(get-in % [:headers "Range"]) @requests)))))
+
+;; --- Finding 2: a resume must not blindly append to a stale `.part`. LFS
+;; --- files are protected by the manifest checksum regardless of how the
+;; --- resume went; non-LFS files (e.g. tokenizer.json) have no checksum, so
+;; --- resuming them is unsafe and they must restart from scratch instead.
+
+(deftest secure-download-discards-stale-part-for-unchecksummed-files
+  ;; tokenizer.json carries no LFS checksum, so nothing downstream catches a
+  ;; corrupt append. Reproduced against the unfixed code first: the stub
+  ;; below models the remote object having changed since the `.part` was
+  ;; written, and pre-fix the code appended the stale prefix to the new
+  ;; object's tail, producing "garbageer-v2" -- neither the old nor the new
+  ;; content -- and cached it with no error.
+  (let [^java.io.File dir (tmp-dir)
+        requests (atom [])
+        transport (fn [{:keys [url headers] :as request}]
+                    (swap! requests conj request)
+                    (cond
+                      (re-find #"/api/models/.*/tree/" url)
+                      {:status 200 :headers {}
+                       :body (ordinary-manifest {"onnx/model.onnx" "model"
+                                                  "tokenizer.json" "tokenizer-v2"})}
+
+                      (re-find #"tokenizer" url)
+                      (if-let [range (get headers "Range")]
+                        (let [start (Long/parseLong (second (re-find #"bytes=(\d+)-" range)))]
+                          {:status 206
+                           :headers {"content-range" (str "bytes " start "-11/12")}
+                           :body (subs "tokenizer-v2" start)})
+                        {:status 200 :headers {} :body "tokenizer-v2"})
+
+                      :else {:status 200 :headers {} :body "model"}))
+        root (io/file dir "org/model")]
+    (.mkdirs root)
+    ;; Stale prefix from an interrupted download of the OLD remote object.
+    ;; It is not a prefix of "tokenizer-v2", so a corrupting append is
+    ;; distinguishable from a correct resume.
+    (spit (io/file root "tokenizer.json.part") "garbage")
+    (hub/fetch-model "org/model" {:cache-dir (.getPath dir) :transport transport})
+    (is (= "tokenizer-v2" (slurp (io/file root "tokenizer.json"))))
+    (is (not-any? #(get-in % [:headers "Range"])
+                  (filter #(re-find #"tokenizer" (:url %)) @requests))
+        "an unchecksummed file must restart fresh, never send Range")))
+
+(deftest secure-download-rejects-content-range-mismatch
+  ;; Even for a checksummed (LFS) resume, a 206 that does not actually start
+  ;; where the Range header asked must not be blindly appended to.
+  (let [^java.io.File dir (tmp-dir)
+        files {"onnx/model.onnx" "model-content" "tokenizer.json" "tokenizer"}
+        transport (fn [{:keys [url headers]}]
+                    (if (re-find #"/api/models/.*/tree/" url)
+                      {:status 200 :headers {} :body (manifest files)}
+                      (if (and (re-find #"model\.onnx" url) (get headers "Range"))
+                        ;; Server ignores the requested offset and answers from 0.
+                        {:status 206 :headers {"content-range" "bytes 0-12/13"} :body "model-content"}
+                        {:status 200 :headers {}
+                         :body (get files (last (re-find #"/resolve/[^/]+/(.*)$" url)))})))
+        root (io/file dir "org/model")]
+    (.mkdirs root)
+    (spit (io/file root "model.onnx.part") "mode")
+    (is (= :invalid-resume
+           (try (hub/fetch-model "org/model" {:cache-dir (.getPath dir) :transport transport})
+                (catch clojure.lang.ExceptionInfo e (:embeddings/error (ex-data e))))))))
 
 (deftest secure-download-serializes-concurrent-writers
   (let [^java.io.File dir (tmp-dir)

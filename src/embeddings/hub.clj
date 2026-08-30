@@ -284,8 +284,23 @@
                   _lock (.lock channel)]
         (f)))))
 
+(defn- content-range-start
+  "Start offset of a `Content-Range: bytes <start>-<end>/<size>` response
+  header, or nil if absent or unparseable."
+  [headers]
+  (when-let [value (response-header headers "content-range")]
+    (when-let [[_ start] (re-find #"bytes\s+(\d+)-" (str value))]
+      (Long/parseLong start))))
+
 (defn- secure-download! [request! opts ^String url ^java.io.File dest expected]
   (let [part (io/file (str (.getPath dest) ".part"))
+        ;; Resuming is only safe when a checksum will catch a corrupt
+        ;; append -- i.e. LFS files, which is exactly what `expected`
+        ;; carries. A file with no manifest checksum has nothing downstream
+        ;; to detect a stale `.part` glued to a changed remote object, so it
+        ;; restarts from scratch instead of resuming.
+        _ (when (and (nil? expected) (.exists part))
+            (.delete part))
         size (if (.exists part) (.length part) 0)
         response (request! {:url url
                             :method "GET"
@@ -299,6 +314,15 @@
         (when-not (contains? #{200 206} status)
           (throw (ex-info (str "Download failed with HTTP " status ": " url)
                           {:embeddings/error :download-failed :status status :url url})))
+        ;; A 206 must actually start where the Range header asked. A server
+        ;; that ignores Range (or answers a different range) must not have
+        ;; its body blindly appended to the `.part` prefix.
+        (when (= 206 status)
+          (let [start (content-range-start (:headers response))]
+            (when (not= start size)
+              (throw (ex-info (str "Unexpected Content-Range for resumed download: " url)
+                              {:embeddings/error :invalid-resume :url url
+                               :expected-offset size :content-range-start start})))))
         (io/make-parents part)
         (let [^bytes bytes (if (bytes? (:body response))
                              (:body response)

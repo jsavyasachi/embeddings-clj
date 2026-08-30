@@ -19,6 +19,18 @@
   host counts as a change), capped at 5 hops
   (`{:embeddings/error :too-many-redirects}`).
 
+### Fixed
+
+- Reject a resumed download whose `206` response does not actually start at
+  the requested `Range` offset, instead of blindly appending it to the
+  `.part` file (`{:embeddings/error :invalid-resume}`).
+- Stop resuming downloads for files with no manifest checksum (all non-LFS
+  files, including `tokenizer.json`). Nothing verified that a `.part` left
+  over from an earlier attempt still matched the current remote object, so a
+  changed remote file could be silently glued to a stale prefix and cached
+  with no error. These files now restart from scratch instead of resuming;
+  LFS files (which carry a checksum) keep resuming as before.
+
 ## [0.6.0] - 2026-08-24
 
 ### Added
