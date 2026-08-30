@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+
+- Validate the `:revision` option before it reaches the filesystem or the Hub
+  URL. A revision containing `..` or a leading `/` could write downloaded files
+  outside the cache dir and redirect the fetch to a different Hub path
+  (`{:embeddings/error :invalid-revision}`). The model cache root is now also
+  checked to stay inside the cache dir
+  (`{:embeddings/error :invalid-cache-path}`).
+
 ## [0.6.0] - 2026-08-24
 
 ### Added

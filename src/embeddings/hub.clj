@@ -23,6 +23,30 @@
     (throw (ex-info (str "Invalid Hugging Face model id: " (pr-str model-id))
                     {:embeddings/error :invalid-model-id :model-id model-id}))))
 
+(def ^:private revision-pattern
+  ;; Branch, tag, or commit SHA. Slashes are legal in git ref names
+  ;; (`refs/pr/1`), so they stay, but the character class is a strict subset of
+  ;; `git check-ref-format`: no control characters, whitespace, backslashes, or
+  ;; any of the URL-significant characters (`% # ? @ ~ ^ : *`).
+  #"[A-Za-z0-9][A-Za-z0-9._/-]*")
+
+(defn- validate-revision!
+  "Reject any revision that could escape the cache dir or rewrite the Hub URL.
+
+  Every accepted character is either URL-unreserved or a `/` that must stay a
+  literal path separator, so the value needs no percent-encoding downstream."
+  [revision]
+  (when-not (and (string? revision)
+                 (re-matches revision-pattern revision)
+                 (not (str/includes? revision ".."))
+                 (not (str/includes? revision "//"))
+                 (not (str/ends-with? revision "/"))
+                 (not-any? #(or (str/starts-with? % ".")
+                                (str/ends-with? % ".lock"))
+                           (str/split revision #"/")))
+    (throw (ex-info (str "Invalid revision: " (pr-str revision))
+                    {:embeddings/error :invalid-revision :revision revision}))))
+
 (defn- resolve-url ^String [model-id revision path]
   (str "https://huggingface.co/" model-id "/resolve/" revision "/" path))
 
@@ -60,17 +84,32 @@
     :else (throw (ex-info (str "Invalid model variant: " (pr-str variant))
                           {:embeddings/error :invalid-variant :variant variant}))))
 
+(defn- within-cache-dir!
+  "Defence in depth: no computed cache path may leave the cache dir, whichever
+  parameter carried the traversal."
+  ^java.io.File [^java.io.File cache-dir ^java.io.File root]
+  (let [base (.getCanonicalPath (.getCanonicalFile cache-dir))
+        path (.getCanonicalPath (.getCanonicalFile root))]
+    (when-not (str/starts-with? path (str base java.io.File/separator))
+      (throw (ex-info (str "Cache path escapes the cache dir: " path)
+                      {:embeddings/error :invalid-cache-path
+                       :path path
+                       :cache-dir base})))
+    root))
+
 (defn- model-root [cache-dir model-id revision variant]
-  (let [model-root (io/file (or cache-dir (default-cache-dir)) model-id)
+  (let [cache-dir (io/file (or cache-dir (default-cache-dir)))
+        model-root (io/file cache-dir model-id)
         ;; Keep the historical default branch location, while isolating pins.
         root (if (= revision "main")
                model-root
                (io/file model-root revision))]
-    (cond
-      (nil? variant) root
-      (= :quantized variant) (io/file root "quantized")
-      (string? variant) (io/file root (variant-slug variant))
-      :else root)))
+    (within-cache-dir! cache-dir
+                       (cond
+                         (nil? variant) root
+                         (= :quantized variant) (io/file root "quantized")
+                         (string? variant) (io/file root (variant-slug variant))
+                         :else root))))
 
 (defn- default-http-client
   ^HttpClient []
@@ -217,6 +256,7 @@
   ([model-id {:keys [cache-dir revision variant] :as opts} download! request!]
    (validate-model-id! model-id)
    (let [revision (or revision "main")
+         _ (validate-revision! revision)
          paths (model-paths variant)
          ^java.io.File root (model-root cache-dir model-id revision variant)
          model-file (io/file root "model.onnx")
@@ -271,7 +311,12 @@
   in a subdir derived from the path.
 
   Errors are `ex-info` keyed `:embeddings/error`
-  (`:invalid-model-id`, `:invalid-variant`, `:download-failed`)."
+  (`:invalid-model-id`, `:invalid-revision`, `:invalid-variant`,
+  `:invalid-cache-path`, `:download-failed`).
+
+  A `:revision` must be a branch, tag, or commit SHA. The library rejects
+  anything outside `[A-Za-z0-9._/-]`, and rejects `..`, so a revision can
+  neither escape the cache dir nor rewrite the Hub URL."
   ([model-id] (fetch-model model-id nil))
   ([model-id opts]
    (let [opts (or opts {})]

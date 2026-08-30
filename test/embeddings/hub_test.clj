@@ -281,3 +281,75 @@
     (is (= :download-failed
            (try (fetch-model* "org/model" {:cache-dir (.getPath dir)} (constantly false))
                 (catch clojure.lang.ExceptionInfo e (:embeddings/error (ex-data e))))))))
+
+(deftest rejects-bad-revisions
+  (doseq [bad ["../../../etc" "a/../../b" "/abs/path" "" "main " (str "main" \newline)
+               (str "ma" \tab "in") (str "main" \backspace) "..\\windows" "main branch"
+               "main?x=1" "main#frag" "%2e%2e" "main//dup" "refs/../pr" "main/"
+               ".hidden" "-leading" "refs/heads/x.lock" "@{now}" "main~1" "main^" "a:b"]]
+    (is (= {:embeddings/error :invalid-revision :revision bad}
+           (try (fetch-model* "org/model" {:revision bad} (constantly true))
+                (catch clojure.lang.ExceptionInfo e (ex-data e))))
+        (pr-str bad)))
+  (is (= :invalid-revision
+         (try (fetch-model* "org/model" {:revision 42} (constantly true))
+              (catch clojure.lang.ExceptionInfo e (:embeddings/error (ex-data e)))))))
+
+(deftest accepts-legitimate-revisions
+  (doseq [good ["main" "v1.0.0" "refs/pr/1" "feature/x" "my.branch-name_1"
+                "0123456789abcdef0123456789abcdef01234567"]]
+    (let [^java.io.File dir (tmp-dir)
+          calls (atom [])
+          download! (fn [url dest]
+                      (swap! calls conj url)
+                      (io/make-parents dest)
+                      (spit dest "x")
+                      true)
+          path (fetch-model* "org/model" {:cache-dir (.getPath dir)
+                                          :revision good}
+                             download!)]
+      (is (.startsWith ^String (.getCanonicalPath (io/file path)) (.getCanonicalPath dir))
+          (pr-str good))
+      (is (= [(str "https://huggingface.co/org/model/resolve/" good "/onnx/model.onnx")
+              (str "https://huggingface.co/org/model/resolve/" good "/tokenizer.json")]
+             @calls)
+          (pr-str good)))))
+
+(deftest bad-revision-never-escapes-the-cache-dir
+  (let [^java.io.File dir (tmp-dir)
+        _ (.mkdirs (io/file dir "org" "model"))
+        dests (atom [])
+        download! (fn [_ dest]
+                    (swap! dests conj (.getCanonicalPath ^java.io.File dest))
+                    (io/make-parents dest)
+                    (spit dest "x")
+                    true)]
+    (is (= :invalid-revision
+           (try (fetch-model* "org/model" {:cache-dir (.getPath dir)
+                                           :revision "../../../PWNED"}
+                              download!)
+                (catch clojure.lang.ExceptionInfo e (:embeddings/error (ex-data e))))))
+    (is (empty? @dests))))
+
+(deftest bad-revision-rejected-through-the-transport-path
+  (let [^java.io.File dir (tmp-dir)
+        requests (atom [])
+        transport (secure-transport requests {"onnx/model.onnx" "model"
+                                              "tokenizer.json" "tokenizer"})]
+    (is (= :invalid-revision
+           (try (hub/fetch-model "org/model" {:cache-dir (.getPath dir)
+                                              :revision "../../../PWNED"
+                                              :transport transport})
+                (catch clojure.lang.ExceptionInfo e (:embeddings/error (ex-data e))))))
+    (is (empty? @requests))))
+
+(deftest model-root-rejects-paths-outside-the-cache-dir
+  ;; Defence in depth: even bypassing `validate-revision!`, a computed root
+  ;; that escapes the cache dir must throw.
+  (let [model-root #'hub/model-root
+        ^java.io.File dir (tmp-dir)]
+    (is (= :invalid-cache-path
+           (try (model-root (.getPath dir) "org/model" "../../../../PWNED" nil)
+                (catch clojure.lang.ExceptionInfo e (:embeddings/error (ex-data e))))))
+    (is (= (.getCanonicalPath (io/file dir "org" "model"))
+           (.getCanonicalPath ^java.io.File (model-root (.getPath dir) "org/model" "main" nil))))))
