@@ -23,12 +23,12 @@
                 :version version
                 :basis @basis
                 :src-dirs ["src"]
-                :scm {:url "https://github.com/jsavyasachi/embeddings-clj"
-                      :connection "scm:git:https://github.com/jsavyasachi/embeddings-clj.git"
-                      :developerConnection "scm:git:ssh://git@github.com/jsavyasachi/embeddings-clj.git"
+                :scm {:url "https://github.com/savyalabs/embeddings-clj"
+                      :connection "scm:git:https://github.com/savyalabs/embeddings-clj.git"
+                      :developerConnection "scm:git:ssh://git@github.com/savyalabs/embeddings-clj.git"
                       :tag (str "v" version)}
                 :pom-data [[:description "Local text-embedding inference for Clojure: run sentence-transformers ONNX models in-process."]
-                           [:url "https://github.com/jsavyasachi/embeddings-clj"]
+                           [:url "https://github.com/savyalabs/embeddings-clj"]
                            [:licenses
                             [:license
                              [:name "Eclipse Public License 2.0"]

@@ -2,7 +2,7 @@
 
 [![Clojars Project](https://img.shields.io/clojars/v/net.clojars.savya/embeddings-clj.svg)](https://clojars.org/net.clojars.savya/embeddings-clj)
 [![cljdoc](https://cljdoc.org/badge/net.clojars.savya/embeddings-clj)](https://cljdoc.org/d/net.clojars.savya/embeddings-clj/CURRENT)
-[![test](https://github.com/jsavyasachi/embeddings-clj/actions/workflows/test.yml/badge.svg)](https://github.com/jsavyasachi/embeddings-clj/actions/workflows/test.yml)
+[![test](https://github.com/savyalabs/embeddings-clj/actions/workflows/test.yml/badge.svg)](https://github.com/savyalabs/embeddings-clj/actions/workflows/test.yml)
 
 Text embeddings for Clojure with local sentence-transformers ONNX exports or
 hosted OpenAI, Cohere, and Voyage models.
@@ -11,7 +11,7 @@ hosted OpenAI, Cohere, and Voyage models.
 
 <a href="https://clojure.org"><img src="https://img.shields.io/badge/Clojure-5881D8?style=flat&logo=clojure&logoColor=fff" alt="Clojure" /></a>
 <a href="https://onnxruntime.ai"><img src="https://img.shields.io/badge/ONNX%20Runtime-5A5AB5?style=flat&logo=onnx&logoColor=fff" alt="ONNX Runtime" /></a>
-<a href="https://github.com/jsavyasachi/tokenizers-clj"><img src="https://img.shields.io/badge/tokenizers--clj-5881D8?style=flat&logo=clojure&logoColor=fff" alt="tokenizers-clj" /></a>
+<a href="https://github.com/savyalabs/tokenizers-clj"><img src="https://img.shields.io/badge/tokenizers--clj-5881D8?style=flat&logo=clojure&logoColor=fff" alt="tokenizers-clj" /></a>
 
 ## Installation
 
